@@ -1,0 +1,20 @@
+# Local generated outputs
+outputs/
+results/
+asset_scene/
+semantic_outputs/
+
+# Python/runtime noise
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Large local archives/checkpoints kept outside the parent repo
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.ckpt
+*.pth
+*.pt
+*.safetensors
