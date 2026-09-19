@@ -337,23 +337,62 @@ def proposal_point_ids(proposal_dir: Path, proposal: dict) -> set[int]:
 
 
 def match_bbox_to_proposals(environment_dir: Path, proposal_dir: Path, image_name: str, bbox_xywh: list[int], category: str | None = None) -> dict:
+    manifest_path = proposal_dir / "proposals.json"
+    manifest = json.loads(manifest_path.read_text())
+    category_norm = normalize_name(category or "") if category else None
+    if not category_norm or category_norm not in manifest.get("category_labels", {}):
+        available = ", ".join(manifest.get("category_labels", {}).keys())
+        raise ValueError(f"Set category before matching. Available: {available}")
+
     images = colmap_images(environment_dir)
     image = next((item for item in images.values() if item.name == image_name), None)
     if image is None:
         raise ValueError(f"Image not registered in COLMAP: {image_name}")
-    x, y, w, h = [int(v) for v in bbox_xywh]
-    x2, y2 = x + max(0, w), y + max(0, h)
+
     import numpy as np
+    stem = Path(image_name).stem
+    stuff_path = environment_dir / "segmentations" / "stuff" / f"{stem}.png"
+    thing_path = environment_dir / "segmentations" / "thing" / f"{stem}.png"
+    if not stuff_path.exists() or not thing_path.exists():
+        raise FileNotFoundError(f"Missing segmentation masks for {image_name}")
+    stuff = np.asarray(Image.open(stuff_path))
+    thing = np.asarray(Image.open(thing_path))
+    if stuff.shape != thing.shape:
+        raise ValueError(f"stuff/thing mask shape mismatch for {image_name}")
+    height, width = stuff.shape
+
+    semantic = np.zeros((height, width), dtype=bool)
+    for item in manifest["category_labels"][category_norm]:
+        source = str(item["source"])
+        label_id = int(item["label_id"])
+        if source == "thing":
+            semantic |= thing == label_id
+        elif source == "stuff":
+            semantic |= (thing == 0) & (stuff == label_id)
+
+    x, y, w, h = [int(v) for v in bbox_xywh]
+    x1 = max(0, min(width - 1, x))
+    y1 = max(0, min(height - 1, y))
+    x2 = max(0, min(width, x + max(0, w)))
+    y2 = max(0, min(height, y + max(0, h)))
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"Invalid bbox: {bbox_xywh}")
+
     xy = np.asarray(image.xys, dtype=np.float64)
     point_ids = np.asarray(image.point3D_ids, dtype=np.int64)
-    inside = (point_ids >= 0) & (xy[:, 0] >= x) & (xy[:, 0] <= x2) & (xy[:, 1] >= y) & (xy[:, 1] <= y2)
-    bbox_ids = set(int(item) for item in point_ids[inside].tolist())
-    manifest_path = proposal_dir / "proposals.json"
-    manifest = json.loads(manifest_path.read_text())
-    category_norm = normalize_name(category or "") if category else None
+    px = np.rint(xy[:, 0]).astype(np.int64)
+    py = np.rint(xy[:, 1]).astype(np.int64)
+    in_image = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+    in_bbox = in_image & (point_ids >= 0) & (px >= x1) & (px < x2) & (py >= y1) & (py < y2)
+    semantic_track = np.zeros(len(point_ids), dtype=bool)
+    semantic_track[in_image] = semantic[py[in_image], px[in_image]]
+    selected = in_bbox & semantic_track
+    raw_bbox_count = int(np.count_nonzero(in_bbox))
+    bbox_ids = set(int(item) for item in point_ids[selected].tolist())
+
     candidates = []
     for proposal in manifest.get("proposals", []):
-        if category_norm and normalize_name(proposal.get("category", "")) != category_norm:
+        if normalize_name(proposal.get("category", "")) != category_norm:
             continue
         ids = proposal_point_ids(proposal_dir, proposal)
         shared = bbox_ids & ids
@@ -373,7 +412,15 @@ def match_bbox_to_proposals(environment_dir: Path, proposal_dir: Path, image_nam
             "proposal_point_count": len(ids),
         })
     candidates.sort(key=lambda item: (item["score"], item["shared_point_count"]), reverse=True)
-    return {"source_image": image_name, "bbox_xywh": bbox_xywh, "bbox_point3d_count": len(bbox_ids), "candidates": candidates[:12]}
+    return {
+        "source_image": image_name,
+        "bbox_xywh": [x1, y1, x2 - x1, y2 - y1],
+        "category": category_norm,
+        "raw_bbox_point3d_count": raw_bbox_count,
+        "bbox_point3d_count": len(bbox_ids),
+        "semantic_pixel_area_in_bbox": int(np.count_nonzero(semantic[y1:y2, x1:x2])),
+        "candidates": candidates[:12],
+    }
 
 
 class AssetPickerHandler(BaseHTTPRequestHandler):
