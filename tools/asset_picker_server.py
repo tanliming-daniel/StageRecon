@@ -16,9 +16,26 @@ from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = REPO_ROOT / "sitcoms3D/data/sparse_reconstruction_and_nerf_data/Friends-monica_apartment"
-DEFAULT_PROPOSALS = REPO_ROOT / "outputs/Friends-monica_apartment/semantic_proposals"
+DEFAULT_PROPOSALS = REPO_ROOT / "outputs/Friends-monica_apartment/semantic_proposals_instances"
 DEFAULT_OUTPUT = REPO_ROOT / "outputs/Friends-monica_apartment/manual_asset_marks"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+SITCOMS3D_ROOT = REPO_ROOT / "sitcoms3D"
+if str(SITCOMS3D_ROOT) not in sys.path:
+    sys.path.insert(0, str(SITCOMS3D_ROOT))
+from sitcoms3D.utils.colmap_utils import read_model  # noqa: E402
+
+_COLMAP_IMAGE_CACHE = {}
+_PROPOSAL_ID_CACHE = {}
+
+def normalize_name(name: str) -> str:
+    return " ".join(name.lower().replace("_", " ").replace("-", " ").split())
+
+def colmap_images(environment_dir: Path):
+    key = str(environment_dir.resolve())
+    if key not in _COLMAP_IMAGE_CACHE:
+        _, images, _ = read_model(str(environment_dir / "colmap"), ext="")
+        _COLMAP_IMAGE_CACHE[key] = images
+    return _COLMAP_IMAGE_CACHE[key]
 
 INDEX_HTML = r"""
 <!doctype html>
@@ -103,6 +120,8 @@ canvas { display:block; max-width:100%; height:auto; cursor:crosshair; }
         <button class="primary" id="saveAssetBtn">Save Asset</button>
         <button id="downloadCropBtn">Download Crop</button>
       </div>
+      <button id="match3dBtn">Match 3D</button>
+      <div class="hint" id="matchResult">No 3D match yet.</div>
       <div class="row">
         <button id="newAssetBtn">New</button>
         <button class="danger" id="deleteAssetBtn">Delete</button>
@@ -201,7 +220,8 @@ function formAsset() {
     category: el('category').value.trim(), proposal_id: el('proposal').value,
     source_image: img.name, image_path: img.path, bbox_xywh: state.bbox ? state.bbox.map(v => Math.round(v)) : null,
     occlusion: el('occlusion').value, priority: el('priority').value,
-    prompt: el('prompt').value, notes: el('notes').value, updated_at: new Date().toISOString()
+    prompt: el('prompt').value, notes: el('notes').value, matched_candidates: state.lastMatch?.candidates || [], bbox_point3d_count: state.lastMatch?.bbox_point3d_count || 0,
+    updated_at: new Date().toISOString()
   };
 }
 function fillForm(asset) {
@@ -214,7 +234,8 @@ function fillForm(asset) {
   el('prompt').value = asset?.prompt || '';
   el('notes').value = asset?.notes || '';
   state.bbox = asset?.bbox_xywh || null;
-  draw(); renderAssets();
+  state.lastMatch = asset?.matched_candidates ? { candidates: asset.matched_candidates, bbox_point3d_count: asset.bbox_point3d_count || 0 } : null;
+  renderMatch(); draw(); renderAssets();
 }
 function loadAssetForImage() {
   const img = currentImage();
@@ -243,6 +264,20 @@ function renderAssets() {
     list.appendChild(div);
   });
 }
+function renderMatch() {
+  const box = el('matchResult');
+  if (!state.lastMatch) { box.textContent = 'No 3D match yet.'; return; }
+  const rows = state.lastMatch.candidates.slice(0, 5).map(c => `${c.proposal_id} ${c.category} score=${c.score.toFixed(3)} hits=${c.shared_point_count}`).join(' | ');
+  box.textContent = `bbox points=${state.lastMatch.bbox_point3d_count}; ${rows || 'no candidate'}`;
+}
+async function match3d() {
+  if (!state.bbox) { alert('Draw a bbox first.'); return; }
+  const payload = { source_image: currentImage().name, bbox_xywh: state.bbox.map(v => Math.round(v)), category: el('category').value.trim() };
+  const result = await api('/api/match', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+  state.lastMatch = result;
+  if (result.candidates.length) { el('proposal').value = result.candidates[0].proposal_id; }
+  renderMatch();
+}
 function downloadCrop() {
   if (!state.image || !state.bbox) return;
   const [x,y,w,h] = state.bbox.map(Math.round);
@@ -259,6 +294,7 @@ el('fitBtn').onclick = fitCanvas;
 el('clearBoxBtn').onclick = () => { state.bbox = null; draw(); };
 el('saveAssetBtn').onclick = saveAsset;
 el('downloadCropBtn').onclick = downloadCrop;
+el('match3dBtn').onclick = match3d;
 el('newAssetBtn').onclick = () => fillForm(null);
 el('deleteAssetBtn').onclick = async () => { const id = el('assetId').value.trim(); state.annotations.assets = state.annotations.assets.filter(a => a.id !== id); await saveAnnotations(); fillForm(null); };
 window.addEventListener('resize', fitCanvas);
@@ -288,6 +324,56 @@ def build_state(environment_dir: Path, proposal_dir: Path, output_dir: Path) -> 
     if annotations_path.exists():
         annotations = json.loads(annotations_path.read_text())
     return {"images": images, "proposals": proposals, "annotations": annotations}
+
+
+def proposal_point_ids(proposal_dir: Path, proposal: dict) -> set[int]:
+    rel = Path(str(proposal["point3d_ids"]))
+    path = rel if rel.is_absolute() else proposal_dir / rel
+    key = str(path.resolve())
+    if key not in _PROPOSAL_ID_CACHE:
+        import numpy as np
+        _PROPOSAL_ID_CACHE[key] = set(int(item) for item in np.load(path).tolist())
+    return _PROPOSAL_ID_CACHE[key]
+
+
+def match_bbox_to_proposals(environment_dir: Path, proposal_dir: Path, image_name: str, bbox_xywh: list[int], category: str | None = None) -> dict:
+    images = colmap_images(environment_dir)
+    image = next((item for item in images.values() if item.name == image_name), None)
+    if image is None:
+        raise ValueError(f"Image not registered in COLMAP: {image_name}")
+    x, y, w, h = [int(v) for v in bbox_xywh]
+    x2, y2 = x + max(0, w), y + max(0, h)
+    import numpy as np
+    xy = np.asarray(image.xys, dtype=np.float64)
+    point_ids = np.asarray(image.point3D_ids, dtype=np.int64)
+    inside = (point_ids >= 0) & (xy[:, 0] >= x) & (xy[:, 0] <= x2) & (xy[:, 1] >= y) & (xy[:, 1] <= y2)
+    bbox_ids = set(int(item) for item in point_ids[inside].tolist())
+    manifest_path = proposal_dir / "proposals.json"
+    manifest = json.loads(manifest_path.read_text())
+    category_norm = normalize_name(category or "") if category else None
+    candidates = []
+    for proposal in manifest.get("proposals", []):
+        if category_norm and normalize_name(proposal.get("category", "")) != category_norm:
+            continue
+        ids = proposal_point_ids(proposal_dir, proposal)
+        shared = bbox_ids & ids
+        if not shared:
+            continue
+        shared_count = len(shared)
+        bbox_fraction = shared_count / max(1, len(bbox_ids))
+        proposal_fraction = shared_count / max(1, len(ids))
+        score = (2.0 * bbox_fraction * proposal_fraction) / max(1e-6, bbox_fraction + proposal_fraction)
+        candidates.append({
+            "proposal_id": proposal["id"],
+            "category": proposal["category"],
+            "shared_point_count": shared_count,
+            "bbox_point_fraction": bbox_fraction,
+            "proposal_point_fraction": proposal_fraction,
+            "score": score,
+            "proposal_point_count": len(ids),
+        })
+    candidates.sort(key=lambda item: (item["score"], item["shared_point_count"]), reverse=True)
+    return {"source_image": image_name, "bbox_xywh": bbox_xywh, "bbox_point3d_count": len(bbox_ids), "candidates": candidates[:12]}
 
 
 class AssetPickerHandler(BaseHTTPRequestHandler):
@@ -342,13 +428,23 @@ class AssetPickerHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        data = json.loads(self.rfile.read(length).decode("utf-8"))
+        if parsed.path == "/api/match":
+            result = match_bbox_to_proposals(
+                self.environment_dir,
+                self.proposal_dir,
+                str(data["source_image"]),
+                list(data["bbox_xywh"]),
+                str(data.get("category") or "") or None,
+            )
+            self.send_json(result)
+            return
         if parsed.path != "/api/annotations":
             self.send_json({"error": "not found"}, 404)
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        data = json.loads(self.rfile.read(length).decode("utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("assets"), list):
-            self.send_json({"error": "expected {'assets': [...]}"}, 400)
+            self.send_json({"error": "expected assets list"}, 400)
             return
         self.output_dir.mkdir(parents=True, exist_ok=True)
         path = self.output_dir / "annotations.json"
@@ -371,6 +467,7 @@ def main() -> None:
     AssetPickerHandler.environment_dir = args.environment_dir.resolve()
     AssetPickerHandler.proposal_dir = args.proposal_dir.resolve()
     AssetPickerHandler.output_dir = args.output_dir.resolve()
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((args.host, args.port), AssetPickerHandler)
     print(f"Asset picker: http://{args.host}:{args.port}")
     print(f"Images: {AssetPickerHandler.environment_dir / 'images'}")
