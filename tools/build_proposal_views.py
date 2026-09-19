@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 from typing import Dict, List, Mapping, Sequence, Tuple
@@ -188,39 +187,25 @@ def choose_component_mask(
     xy: np.ndarray,
     min_area: int,
 ) -> np.ndarray:
-    candidate = semantic_mask & track_region
-    if int(candidate.sum()) < min_area:
-        # Fall back to semantic segmentation in the track bbox. The fallback
-        # is useful for thin objects whose sparse tracks miss the mask pixels.
-        candidate = semantic_mask.copy()
+    del track_region
+    height, width = semantic_mask.shape
+    track_xy = np.rint(xy).astype(np.int64)
+    in_bounds = (
+        (track_xy[:, 0] >= 0)
+        & (track_xy[:, 0] < width)
+        & (track_xy[:, 1] >= 0)
+        & (track_xy[:, 1] < height)
+    )
+    track_flat = set((track_xy[in_bounds, 1] * width + track_xy[in_bounds, 0]).tolist())
+    if not track_flat:
+        return np.zeros(semantic_mask.shape, dtype=bool)
 
-    components = connected_components(candidate)
-    if not components:
-        return np.zeros(candidate.shape, dtype=bool)
-
-    height, width = candidate.shape
-    track_pixels = np.rint(xy).astype(int)
-    best_score = -1.0
-    best_component = components[0]
-    for component in components:
-        ys = component // width
-        xs = component % width
-        component_area = len(component)
-        if len(track_pixels) > 0:
-            nearest_distance = float("inf")
-            for track_x, track_y in track_pixels:
-                distance = np.min((xs - track_x) ** 2 + (ys - track_y) ** 2)
-                nearest_distance = min(nearest_distance, float(distance))
-            proximity = float(np.exp(-math.sqrt(nearest_distance) / 80.0))
-        else:
-            proximity = 0.0
-        score = proximity * 1_000_000.0 + math.log1p(component_area)
-        if score > best_score:
-            best_score = score
-            best_component = component
-
-    result = np.zeros(candidate.shape, dtype=bool)
-    result[best_component // width, best_component % width] = True
+    result = np.zeros(semantic_mask.shape, dtype=bool)
+    for component in connected_components(semantic_mask):
+        if track_flat.intersection(component.tolist()):
+            result[component // width, component % width] = True
+    if int(result.sum()) < min_area:
+        return np.zeros(semantic_mask.shape, dtype=bool)
     return result
 
 
@@ -301,6 +286,8 @@ def proposal_view(
     track_radius: int,
     bbox_padding: float,
     bbox_min_padding: int,
+    min_track_overlap: float,
+    max_person_fraction: float,
     max_images: int | None,
     output_dir: Path,
 ) -> dict:
@@ -335,6 +322,18 @@ def proposal_view(
             (height, width), xy, radius=track_radius, bbox_padding=bbox_padding
         )
         semantic = category_mask(stuff, thing, category_labels)
+        track_xy = np.rint(xy).astype(np.int64)
+        in_bounds = (
+            (track_xy[:, 0] >= 0)
+            & (track_xy[:, 0] < width)
+            & (track_xy[:, 1] >= 0)
+            & (track_xy[:, 1] < height)
+        )
+        track_overlap = float(
+            semantic[track_xy[in_bounds, 1], track_xy[in_bounds, 0]].mean()
+        ) if np.any(in_bounds) else 0.0
+        if track_overlap < min_track_overlap:
+            continue
         proposal_mask = choose_component_mask(
             semantic, track_region, xy, min_area=min_mask_area
         )
@@ -342,6 +341,13 @@ def proposal_view(
         if mask_area < min_mask_area:
             continue
         bbox = padded_bbox(proposal_mask, bbox_padding, bbox_min_padding)
+        x_min, y_min, x_max, y_max = bbox
+        person_fraction = float(
+            np.count_nonzero(thing[y_min:y_max, x_min:x_max] == 1)
+            / max(1, (x_max - x_min) * (y_max - y_min))
+        )
+        if person_fraction > max_person_fraction:
+            continue
         candidates.append(
             {
                 "image": image,
@@ -350,12 +356,14 @@ def proposal_view(
                 "bbox": bbox,
                 "track_count": int(selected.sum()),
                 "mask_area": mask_area,
+                "track_overlap": track_overlap,
+                "person_fraction": person_fraction,
                 "coverage": float(mask_area / (width * height)),
             }
         )
 
     candidates.sort(
-        key=lambda item: (item["track_count"], item["mask_area"]),
+        key=lambda item: (item["mask_area"] * item["track_overlap"], item["track_count"]),
         reverse=True,
     )
     if max_views > 0:
@@ -383,6 +391,8 @@ def proposal_view(
                 "bbox_xyxy": [x_min, y_min, x_max, y_max],
                 "crop_size": [x_max - x_min, y_max - y_min],
                 "track_count": candidate["track_count"],
+                "track_overlap": candidate["track_overlap"],
+                "person_fraction_in_crop": candidate["person_fraction"],
                 "mask_area": candidate["mask_area"],
                 "mask_fraction_of_frame": candidate["coverage"],
             }
@@ -444,6 +454,8 @@ def make_parser() -> argparse.ArgumentParser:
         help="Relative padding around projected tracks and final object crop.",
     )
     parser.add_argument("--bbox-min-padding", type=int, default=8)
+    parser.add_argument("--min-track-overlap", type=float, default=0.6)
+    parser.add_argument("--max-person-fraction", type=float, default=0.35)
     parser.add_argument("--max-images", type=int, default=None)
     return parser
 
@@ -463,6 +475,10 @@ def main() -> None:
         raise ValueError("min-track-points and min-mask-area must be positive")
     if args.track_radius < 0 or args.bbox_padding < 0 or args.bbox_min_padding < 0:
         raise ValueError("track radius and bbox padding must be non-negative")
+    if not 0.0 <= args.min_track_overlap <= 1.0:
+        raise ValueError("min-track-overlap must be in [0, 1]")
+    if not 0.0 <= args.max_person_fraction <= 1.0:
+        raise ValueError("max-person-fraction must be in [0, 1]")
 
     environment_dir = args.environment_dir.resolve()
     proposal_dir = resolve_path(
@@ -498,6 +514,8 @@ def main() -> None:
             track_radius=args.track_radius,
             bbox_padding=args.bbox_padding,
             bbox_min_padding=args.bbox_min_padding,
+            min_track_overlap=args.min_track_overlap,
+            max_person_fraction=args.max_person_fraction,
             max_images=args.max_images,
             output_dir=output_dir,
         )
@@ -520,6 +538,8 @@ def main() -> None:
             "bbox_padding": args.bbox_padding,
             "bbox_min_padding": args.bbox_min_padding,
             "max_images": args.max_images,
+            "min_track_overlap": args.min_track_overlap,
+            "max_person_fraction": args.max_person_fraction,
         },
         "proposals": proposal_manifests,
     }
