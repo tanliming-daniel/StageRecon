@@ -216,7 +216,11 @@ function draw() {
 }
 function canvasPoint(e) {
   const r = canvas.getBoundingClientRect();
-  return [(e.clientX - r.left) / state.scale, (e.clientY - r.top) / state.scale];
+  // Use the actual CSS display size. The canvas can be scaled again by max-width,
+  // so state.scale alone is not a reliable inverse transform.
+  const sx = state.image.naturalWidth / r.width;
+  const sy = state.image.naturalHeight / r.height;
+  return [(e.clientX - r.left) * sx, (e.clientY - r.top) * sy];
 }
 canvas.addEventListener('mousedown', e => { const [x,y] = canvasPoint(e); state.drawing = { x0:x, y0:y }; });
 canvas.addEventListener('mousemove', e => {
