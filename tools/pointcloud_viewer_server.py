@@ -259,15 +259,21 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     }
 
 
-def draw_indices(proposal_dir: Path, cloud: dict, sample: int) -> np.ndarray:
+def draw_indices(
+    proposal_dir: Path,
+    cloud: dict,
+    sample: int,
+    keep_ids: set[int] | None = None,
+) -> np.ndarray:
     proposal_union = all_proposal_ids(proposal_dir, cloud["proposals"])
-    in_any_proposal = np.isin(cloud["point_ids"], np.fromiter(proposal_union, dtype=np.int64))
-    proposal_idx = np.flatnonzero(in_any_proposal)
-    bg_idx = np.flatnonzero(~in_any_proposal)
+    protected_ids = proposal_union | (keep_ids or set())
+    protected = np.isin(cloud["point_ids"], np.fromiter(protected_ids, dtype=np.int64))
+    protected_idx = np.flatnonzero(protected)
+    bg_idx = np.flatnonzero(~protected)
     if len(bg_idx) > sample:
         rng = np.random.default_rng(7)
         bg_idx = rng.choice(bg_idx, size=sample, replace=False)
-    return np.concatenate([bg_idx, proposal_idx]).astype(np.int64)
+    return np.concatenate([bg_idx, protected_idx]).astype(np.int64)
 
 
 def binary_response_arrays(header: dict, arrays: list[np.ndarray]) -> tuple[bytes, int]:
@@ -340,7 +346,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     self.environment_dir, cloud, image_name, bbox, category
                 )
                 sample = int(q.get("sample", ["120000"])[0])
-                idx = draw_indices(self.proposal_dir, cloud, sample)
+                idx = draw_indices(self.proposal_dir, cloud, sample, keep_ids=ids)
                 id_array = np.fromiter(ids, dtype=np.int64) if ids else np.empty(0, dtype=np.int64)
                 selected_drawn = np.isin(cloud["point_ids"][idx], id_array)
                 all_selected = np.isin(cloud["point_ids"], id_array)
