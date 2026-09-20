@@ -107,7 +107,7 @@ canvas { display:block; max-width:100%; height:auto; cursor:crosshair; }
     <div class="form">
       <div class="row">
         <div><label>Asset ID</label><input id="assetId" placeholder="couch_monica_main" /></div>
-        <div><label>Category</label><input id="category" placeholder="couch" /></div>
+        <div><label>Segmentation category</label><select id="category"></select></div>
       </div>
       <div><label>Bind 3D Proposal</label><select id="proposal"></select></div>
       <div class="row">
@@ -126,13 +126,13 @@ canvas { display:block; max-width:100%; height:auto; cursor:crosshair; }
         <button id="newAssetBtn">New</button>
         <button class="danger" id="deleteAssetBtn">Delete</button>
       </div>
-      <div class="hint">Draw a rectangle on the image. Saving stores image name, bbox in original pixels, proposal binding, prompt, and notes into annotations.json.</div>
+      <div class="hint">Choose the semantic segmentation category, draw a rectangle around the asset, and save. The builder later keeps only COLMAP tracks inside bbox ∩ segmentation.</div>
     </div>
     <div id="assetList" class="assetList"></div>
   </aside>
 </div>
 <script>
-const state = { images: [], proposals: [], annotations: { assets: [] }, index: 0, image: null, bbox: null, scale: 1, drawing: null, selectedAssetId: null };
+const state = { images: [], proposals: [], categoryLabels: {}, annotations: { assets: [] }, index: 0, image: null, bbox: null, scale: 1, drawing: null, selectedAssetUid: null };
 const el = id => document.getElementById(id);
 const canvas = el('canvas');
 const ctx = canvas.getContext('2d');
@@ -150,10 +150,19 @@ async function init() {
   const data = await api('/api/state');
   state.images = data.images;
   state.proposals = data.proposals;
+  state.categoryLabels = data.category_labels || {};
   state.annotations = data.annotations || { assets: [] };
-  renderProposals(); renderThumbs(); renderAssets();
+  renderCategories(); renderProposals(); renderThumbs(); renderAssets();
   el('imageCount').textContent = `${state.images.length} images`;
   if (state.images.length) await loadImage(0);
+}
+function renderCategories() {
+  const select = el('category');
+  const categories = Object.keys(state.categoryLabels).sort();
+  select.innerHTML = '<option value="">choose segmentation</option>' + categories.map(category => {
+    const labels = state.categoryLabels[category].map(item => `${item.source}:${item.label_id}`).join(', ');
+    return `<option value="${category}">${category} · ${labels}</option>`;
+  }).join('');
 }
 function renderProposals() {
   const select = el('proposal');
@@ -216,6 +225,7 @@ canvas.addEventListener('mouseup', () => { state.drawing = null; });
 function formAsset() {
   const img = currentImage();
   return {
+    uid: state.selectedAssetUid || `mark_${Date.now()}_${Math.random().toString(16).slice(2)}`,
     id: el('assetId').value.trim() || `asset_${Date.now()}`,
     category: el('category').value.trim(), proposal_id: el('proposal').value,
     source_image: img.name, image_path: img.path, bbox_xywh: state.bbox ? state.bbox.map(v => Math.round(v)) : null,
@@ -225,7 +235,7 @@ function formAsset() {
   };
 }
 function fillForm(asset) {
-  state.selectedAssetId = asset ? asset.id : null;
+  state.selectedAssetUid = asset ? (asset.uid || asset.id) : null;
   el('assetId').value = asset?.id || '';
   el('category').value = asset?.category || '';
   el('proposal').value = asset?.proposal_id || '';
@@ -245,7 +255,7 @@ function loadAssetForImage() {
 async function saveAsset() {
   const asset = formAsset();
   if (!asset.source_image || !asset.bbox_xywh) { alert('Draw a bbox first.'); return; }
-  const idx = state.annotations.assets.findIndex(a => a.id === asset.id);
+  const idx = state.annotations.assets.findIndex(a => (a.uid || a.id) === asset.uid);
   if (idx >= 0) state.annotations.assets[idx] = asset; else state.annotations.assets.push(asset);
   await saveAnnotations(); fillForm(asset);
 }
@@ -258,7 +268,7 @@ function renderAssets() {
   list.innerHTML = '';
   [...state.annotations.assets].reverse().forEach(asset => {
     const div = document.createElement('div');
-    div.className = 'assetItem' + (asset.id === state.selectedAssetId ? ' active' : '');
+    div.className = 'assetItem' + ((asset.uid || asset.id) === state.selectedAssetUid ? ' active' : '');
     div.innerHTML = `<strong>${asset.id}</strong><small>${asset.category || 'uncategorized'} · ${asset.proposal_id || 'no proposal'} · ${asset.source_image}</small>`;
     div.onclick = async () => { const idx = state.images.findIndex(i => i.name === asset.source_image); if (idx >= 0) await loadImage(idx); fillForm(asset); };
     list.appendChild(div);
@@ -296,7 +306,7 @@ el('saveAssetBtn').onclick = saveAsset;
 el('downloadCropBtn').onclick = downloadCrop;
 el('match3dBtn').onclick = match3d;
 el('newAssetBtn').onclick = () => fillForm(null);
-el('deleteAssetBtn').onclick = async () => { const id = el('assetId').value.trim(); state.annotations.assets = state.annotations.assets.filter(a => a.id !== id); await saveAnnotations(); fillForm(null); };
+el('deleteAssetBtn').onclick = async () => { const uid = state.selectedAssetUid; if (uid) state.annotations.assets = state.annotations.assets.filter(a => (a.uid || a.id) !== uid); await saveAnnotations(); fillForm(null); };
 window.addEventListener('resize', fitCanvas);
 init().catch(err => { console.error(err); alert(err.message); });
 </script>
@@ -312,9 +322,11 @@ def build_state(environment_dir: Path, proposal_dir: Path, output_dir: Path) -> 
         if path.suffix.lower() in IMAGE_EXTENSIONS:
             images.append({"name": path.name, "path": str(path.resolve())})
     proposals = []
+    category_labels = {}
     manifest_path = proposal_dir / "proposals.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
+        category_labels = manifest.get("category_labels", {})
         proposals = [
             {"id": item["id"], "category": item["category"], "point_count": item.get("point_count", 0)}
             for item in manifest.get("proposals", [])
@@ -323,7 +335,12 @@ def build_state(environment_dir: Path, proposal_dir: Path, output_dir: Path) -> 
     annotations = {"assets": []}
     if annotations_path.exists():
         annotations = json.loads(annotations_path.read_text())
-    return {"images": images, "proposals": proposals, "annotations": annotations}
+    return {
+        "images": images,
+        "proposals": proposals,
+        "category_labels": category_labels,
+        "annotations": annotations,
+    }
 
 
 def proposal_point_ids(proposal_dir: Path, proposal: dict) -> set[int]:
