@@ -120,7 +120,10 @@ canvas { display:block; max-width:100%; height:auto; cursor:crosshair; }
         <button class="primary" id="saveAssetBtn">Save Asset</button>
         <button id="downloadCropBtn">Download Crop</button>
       </div>
-      <button id="match3dBtn">Match 3D</button>
+      <div class="row">
+        <button id="match3dBtn">Match 3D</button>
+        <button id="show3dBtn">Show 3D Selection</button>
+      </div>
       <div class="hint" id="matchResult">No 3D match yet.</div>
       <div class="row">
         <button id="newAssetBtn">New</button>
@@ -288,6 +291,17 @@ async function match3d() {
   if (result.candidates.length) { el('proposal').value = result.candidates[0].proposal_id; }
   renderMatch();
 }
+function show3dSelection() {
+  if (!state.bbox) { alert('Draw a bbox first.'); return; }
+  const category = el('category').value.trim();
+  if (!category) { alert('Choose a segmentation category first.'); return; }
+  const params = new URLSearchParams({
+    image: currentImage().name,
+    bbox: state.bbox.map(v => Math.round(v)).join(','),
+    category
+  });
+  window.open(`${location.protocol}//${location.hostname}:8017/?${params.toString()}`, '_blank');
+}
 function downloadCrop() {
   if (!state.image || !state.bbox) return;
   const [x,y,w,h] = state.bbox.map(Math.round);
@@ -305,6 +319,7 @@ el('clearBoxBtn').onclick = () => { state.bbox = null; draw(); };
 el('saveAssetBtn').onclick = saveAsset;
 el('downloadCropBtn').onclick = downloadCrop;
 el('match3dBtn').onclick = match3d;
+el('show3dBtn').onclick = show3dSelection;
 el('newAssetBtn').onclick = () => fillForm(null);
 el('deleteAssetBtn').onclick = async () => { const uid = state.selectedAssetUid; if (uid) state.annotations.assets = state.annotations.assets.filter(a => (a.uid || a.id) !== uid); await saveAnnotations(); fillForm(null); };
 window.addEventListener('resize', fitCanvas);

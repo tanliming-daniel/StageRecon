@@ -12,12 +12,20 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
+from PIL import Image
 from plyfile import PlyData
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ENV = REPO_ROOT / "sitcoms3D/data/sparse_reconstruction_and_nerf_data/Friends-monica_apartment"
 DEFAULT_PROPOSAL_DIR = REPO_ROOT / "outputs/Friends-monica_apartment/semantic_proposals_instances"
+SITCOMS3D_ROOT = REPO_ROOT / "sitcoms3D"
+if str(SITCOMS3D_ROOT) not in sys.path:
+    sys.path.insert(0, str(SITCOMS3D_ROOT))
+from sitcoms3D.utils.colmap_utils import read_model  # noqa: E402
+
 _CACHE: dict[str, dict] = {}
+_COLMAP_IMAGE_CACHE: dict[str, dict] = {}
 
 HTML = r"""
 <!doctype html>
@@ -57,7 +65,7 @@ main { position:relative; min-width:0; }
   </div>
   <div class="legend">
     Mouse drag rotates. Wheel zooms. Shift+drag pans.<br><br>
-    Full point cloud is rendered as small colored points. Selected proposal is drawn as larger yellow points with a pulse, so you can verify where the 3D proposal lives in the whole scene.
+    Full point cloud is rendered as small colored points. A selected proposal or image bbox ∩ segmentation region is drawn as larger yellow points with a pulse.
   </div>
 </aside>
 <main><canvas id="gl"></canvas><div class="hud" id="hud">not loaded</div></main>
@@ -69,6 +77,13 @@ let gl, program, buffers = {}, meta = null;
 let camera = { rx: -0.55, ry: 0.35, tx: 0, ty: 0, dist: 12, center:[0,0,0], radius: 8 };
 let drag = null;
 let cloudLoaded = false;
+const selectionQuery = new URLSearchParams(location.search);
+const imageSelection = {
+  image: selectionQuery.get('image'),
+  bbox: selectionQuery.get('bbox'),
+  category: selectionQuery.get('category')
+};
+imageSelection.active = Boolean(imageSelection.image && imageSelection.bbox && imageSelection.category);
 
 const vs = `
 attribute vec3 aPosition;
@@ -111,7 +126,25 @@ function setBuffer(name, data, size, usage=gl.STATIC_DRAW){ let b=buffers[name];
 async function loadMeta(){ meta=await (await fetch('/api/state')).json(); el('proposal').innerHTML=meta.proposals.map(p=>`<option value="${p.id}">${p.id} · ${p.category} · ${p.point_count} pts</option>`).join(''); el('stats').textContent=`${meta.point_count} points, ${meta.proposals.length} proposals`; }
 async function readBinaryJson(url){ const res=await fetch(url); const headerLen=Number(res.headers.get('X-Header-Length')); const buf=await res.arrayBuffer(); const header=JSON.parse(new TextDecoder().decode(buf.slice(0,headerLen))); return {header, data:buf.slice(headerLen)}; }
 async function loadCloud(){ const sample=Number(el('sample').value||120000); el('hud').textContent='loading point cloud...'; const {header,data}=await readBinaryJson(`/api/cloud?sample=${sample}`); const n=header.count; const floats=new Float32Array(data); const pos=floats.slice(0,n*3); const col=floats.slice(n*3,n*6); setBuffer('aPosition',pos,3); setBuffer('aColor',col,3); window.currentCount=n; camera.center=header.center; camera.radius=header.radius; camera.dist=header.radius*2.2; camera.tx=0; camera.ty=0; cloudLoaded=true; await loadHighlight(); }
-async function loadHighlight(){ if(!cloudLoaded) return loadCloud(); const proposal=el('proposal').value; const sample=Number(el('sample').value||120000); const {header,data}=await readBinaryJson(`/api/highlight?proposal=${encodeURIComponent(proposal)}&sample=${sample}`); const hi=new Float32Array(data); setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW); el('hud').textContent=`${proposal}: ${header.highlight_count} highlighted / ${window.currentCount} drawn`; }
+async function loadSelection(){
+  const sample=Number(el('sample').value||120000);
+  const query=new URLSearchParams({image:imageSelection.image,bbox:imageSelection.bbox,category:imageSelection.category,sample:String(sample)});
+  const {header,data}=await readBinaryJson(`/api/selection?${query.toString()}`);
+  const hi=new Float32Array(data);
+  setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
+  const centroid=header.selection_centroid ? header.selection_centroid.map(v=>Number(v).toFixed(2)).join(', ') : 'n/a';
+  el('hud').textContent=`${header.category} · ${header.selection_point_count} selected 3D pts · ${header.highlight_count} drawn · center (${centroid})`;
+}
+async function loadHighlight(){
+  if(!cloudLoaded) return loadCloud();
+  if(imageSelection.active) return loadSelection();
+  const proposal=el('proposal').value;
+  const sample=Number(el('sample').value||120000);
+  const {header,data}=await readBinaryJson(`/api/highlight?proposal=${encodeURIComponent(proposal)}&sample=${sample}`);
+  const hi=new Float32Array(data);
+  setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
+  el('hud').textContent=`${proposal}: ${header.highlight_count} highlighted / ${window.currentCount} drawn`;
+}
 function mvp(){ const aspect=canvas.width/Math.max(1,canvas.height); let view=mat4Identity(); view=mat4Mul(view,translate(camera.tx,camera.ty,-camera.dist)); view=mat4Mul(view,rotateX(camera.rx)); view=mat4Mul(view,rotateY(camera.ry)); view=mat4Mul(view,translate(-camera.center[0],-camera.center[1],-camera.center[2])); return mat4Mul(perspective(Math.PI/4,aspect,0.01,1000),view); }
 function render(t=0){ resize(); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT); gl.useProgram(program); gl.uniformMatrix4fv(gl.getUniformLocation(program,'uMvp'),false,new Float32Array(mvp())); gl.uniform1f(gl.getUniformLocation(program,'uTime'),t/1000); gl.uniform1f(gl.getUniformLocation(program,'uPointSize'),Math.max(1.1, window.devicePixelRatio||1)); if(window.currentCount) gl.drawArrays(gl.POINTS,0,window.currentCount); requestAnimationFrame(render); }
 canvas.addEventListener('mousedown',e=>{drag={x:e.clientX,y:e.clientY,shift:e.shiftKey,rx:camera.rx,ry:camera.ry,tx:camera.tx,ty:camera.ty};});
@@ -139,7 +172,7 @@ def load_cloud(proposal_dir: Path) -> dict:
     proposals = manifest.get("proposals", [])
     center = xyz.mean(axis=0).astype(np.float32)
     radius = float(np.linalg.norm(xyz - center, axis=1).max())
-    data = {"xyz": xyz, "rgb": rgb, "point_ids": point_ids, "proposals": proposals, "center": center, "radius": radius}
+    data = {"xyz": xyz, "rgb": rgb, "point_ids": point_ids, "proposals": proposals, "category_labels": manifest.get("category_labels", {}), "center": center, "radius": radius}
     _CACHE[key] = data
     return data
 
@@ -155,6 +188,75 @@ def all_proposal_ids(proposal_dir: Path, proposals: list[dict]) -> set[int]:
     for proposal in proposals:
         ids.update(proposal_ids(proposal_dir, proposal))
     return ids
+
+
+def normalize_name(name: str) -> str:
+    return " ".join(name.lower().replace("_", " ").replace("-", " ").split())
+
+
+def colmap_images(environment_dir: Path):
+    key = str(environment_dir.resolve())
+    if key not in _COLMAP_IMAGE_CACHE:
+        _, images, _ = read_model(str(environment_dir / "colmap"), ext="")
+        _COLMAP_IMAGE_CACHE[key] = images
+    return _COLMAP_IMAGE_CACHE[key]
+
+
+def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbox: list[int], category: str) -> tuple[set[int], dict]:
+    category_norm = normalize_name(category)
+    labels = cloud["category_labels"].get(category_norm)
+    if not labels:
+        available = ", ".join(sorted(cloud["category_labels"]))
+        raise ValueError(f"Unknown segmentation category '{category}'. Available: {available}")
+    image = next((item for item in colmap_images(environment_dir).values() if item.name == image_name), None)
+    if image is None:
+        raise ValueError(f"Image not registered in COLMAP: {image_name}")
+
+    stem = Path(image_name).stem
+    stuff_path = environment_dir / "segmentations" / "stuff" / f"{stem}.png"
+    thing_path = environment_dir / "segmentations" / "thing" / f"{stem}.png"
+    if not stuff_path.exists() or not thing_path.exists():
+        raise FileNotFoundError(f"Missing segmentation masks for {image_name}")
+    stuff = np.asarray(Image.open(stuff_path))
+    thing = np.asarray(Image.open(thing_path))
+    if stuff.shape != thing.shape:
+        raise ValueError(f"stuff/thing mask shape mismatch for {image_name}")
+    semantic = np.zeros(stuff.shape, dtype=bool)
+    for item in labels:
+        source = str(item["source"])
+        label_id = int(item["label_id"])
+        if source == "thing":
+            semantic |= thing == label_id
+        elif source == "stuff":
+            semantic |= (thing == 0) & (stuff == label_id)
+
+    height, width = semantic.shape
+    x, y, w, h = [int(v) for v in bbox]
+    x1 = max(0, min(width - 1, x))
+    y1 = max(0, min(height - 1, y))
+    x2 = max(0, min(width, x + max(0, w)))
+    y2 = max(0, min(height, y + max(0, h)))
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"Invalid bbox: {bbox}")
+
+    xy = np.asarray(image.xys, dtype=np.float64)
+    point_ids = np.asarray(image.point3D_ids, dtype=np.int64)
+    px = np.rint(xy[:, 0]).astype(np.int64)
+    py = np.rint(xy[:, 1]).astype(np.int64)
+    in_image = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+    in_bbox = in_image & (point_ids >= 0) & (px >= x1) & (px < x2) & (py >= y1) & (py < y2)
+    semantic_track = np.zeros(len(point_ids), dtype=bool)
+    semantic_track[in_image] = semantic[py[in_image], px[in_image]]
+    selected = in_bbox & semantic_track
+    ids = {int(item) for item in point_ids[selected].tolist()}
+    return ids, {
+        "source_image": image_name,
+        "category": category_norm,
+        "bbox_xywh": [x1, y1, x2 - x1, y2 - y1],
+        "raw_bbox_track_count": int(np.count_nonzero(in_bbox)),
+        "semantic_track_count": int(np.count_nonzero(selected)),
+        "semantic_pixel_area_in_bbox": int(np.count_nonzero(semantic[y1:y2, x1:x2])),
+    }
 
 
 def draw_indices(proposal_dir: Path, cloud: dict, sample: int) -> np.ndarray:
@@ -176,6 +278,7 @@ def binary_response_arrays(header: dict, arrays: list[np.ndarray]) -> tuple[byte
 
 class ViewerHandler(BaseHTTPRequestHandler):
     proposal_dir: Path
+    environment_dir: Path
 
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write("[pointcloud-viewer] " + fmt % args + "\n")
@@ -222,6 +325,40 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 }, [xyz.reshape(-1), rgb.reshape(-1)])
                 self.send_bytes(payload, "application/octet-stream", headers={"X-Header-Length": str(header_len)})
                 return
+            if parsed.path == "/api/selection":
+                q = parse_qs(parsed.query)
+                image_name = q.get("image", [""])[0]
+                category = q.get("category", [""])[0]
+                bbox_text = q.get("bbox", [""])[0]
+                try:
+                    bbox = [int(float(value)) for value in bbox_text.split(",")]
+                except ValueError as exc:
+                    raise ValueError(f"Invalid bbox query: {bbox_text}") from exc
+                if len(bbox) != 4:
+                    raise ValueError(f"Expected bbox=x,y,w,h, got: {bbox_text}")
+                ids, selection = selection_point_ids(
+                    self.environment_dir, cloud, image_name, bbox, category
+                )
+                sample = int(q.get("sample", ["120000"])[0])
+                idx = draw_indices(self.proposal_dir, cloud, sample)
+                id_array = np.fromiter(ids, dtype=np.int64) if ids else np.empty(0, dtype=np.int64)
+                selected_drawn = np.isin(cloud["point_ids"][idx], id_array)
+                all_selected = np.isin(cloud["point_ids"], id_array)
+                selected_xyz = cloud["xyz"][all_selected]
+                if len(selected_xyz):
+                    selection["selection_centroid"] = selected_xyz.mean(axis=0).astype(float).tolist()
+                    selection["selection_bbox_min"] = selected_xyz.min(axis=0).astype(float).tolist()
+                    selection["selection_bbox_max"] = selected_xyz.max(axis=0).astype(float).tolist()
+                else:
+                    selection["selection_centroid"] = None
+                    selection["selection_bbox_min"] = None
+                    selection["selection_bbox_max"] = None
+                selection["selection_point_count"] = len(ids)
+                selection["highlight_count"] = int(np.count_nonzero(selected_drawn))
+                selection["drawn_count"] = int(len(idx))
+                payload, header_len = binary_response_arrays(selection, [selected_drawn.astype(np.float32)])
+                self.send_bytes(payload, "application/octet-stream", headers={"X-Header-Length": str(header_len)})
+                return
             if parsed.path == "/api/highlight":
                 q = parse_qs(parsed.query)
                 proposal_id = q.get("proposal", [cloud["proposals"][0]["id"]])[0]
@@ -247,6 +384,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a WebGL point cloud proposal viewer.")
+    parser.add_argument("--environment-dir", type=Path, default=DEFAULT_ENV)
     parser.add_argument("--proposal-dir", type=Path, default=DEFAULT_PROPOSAL_DIR)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8017)
@@ -255,6 +393,7 @@ def make_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = make_parser().parse_args()
+    ViewerHandler.environment_dir = args.environment_dir.resolve()
     ViewerHandler.proposal_dir = args.proposal_dir.resolve()
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((args.host, args.port), ViewerHandler)
