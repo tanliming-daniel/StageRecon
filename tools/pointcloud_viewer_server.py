@@ -82,9 +82,10 @@ const selectionQuery = new URLSearchParams(location.search);
 const imageSelection = {
   image: selectionQuery.get('image'),
   bbox: selectionQuery.get('bbox'),
-  category: selectionQuery.get('category')
+  category: selectionQuery.get('category'),
+  mode: selectionQuery.get('mode') || (selectionQuery.get('category') ? 'segmentation' : 'bbox')
 };
-imageSelection.active = Boolean(imageSelection.image && imageSelection.bbox && imageSelection.category);
+imageSelection.active = Boolean(imageSelection.image && imageSelection.bbox && (imageSelection.mode === 'bbox' || imageSelection.category));
 
 const vs = `
 attribute vec3 aPosition;
@@ -129,12 +130,14 @@ async function readBinaryJson(url){ const res=await fetch(url); const headerLen=
 async function loadCloud(){ const sample=Number(el('sample').value||120000); el('hud').textContent='loading point cloud...'; const {header,data}=await readBinaryJson(`/api/cloud?sample=${sample}`); const n=header.count; const floats=new Float32Array(data); const pos=floats.slice(0,n*3); const col=floats.slice(n*3,n*6); setBuffer('aPosition',pos,3); setBuffer('aColor',col,3); window.currentCount=n; camera.center=header.center; camera.radius=header.radius; camera.dist=header.radius*2.2; camera.tx=0; camera.ty=0; cloudLoaded=true; await loadHighlight(); }
 async function loadSelection(){
   const sample=Number(el('sample').value||120000);
-  const query=new URLSearchParams({image:imageSelection.image,bbox:imageSelection.bbox,category:imageSelection.category,sample:String(sample)});
+  const query=new URLSearchParams({image:imageSelection.image,bbox:imageSelection.bbox,mode:imageSelection.mode,sample:String(sample)});
+  if(imageSelection.category) query.set('category', imageSelection.category);
   const {header,data}=await readBinaryJson(`/api/selection?${query.toString()}`);
   const hi=new Float32Array(data);
   setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
   const centroid=header.selection_centroid ? header.selection_centroid.map(v=>Number(v).toFixed(2)).join(', ') : 'n/a';
-  el('hud').textContent=`${header.category} · mask ${header.semantic_pixel_area_in_bbox}px · direct ${header.semantic_track_count} · projected ${header.projected_point_count} · 3D ${header.selection_point_count} · center (${centroid})`;
+  const label = header.segmentation_applied ? header.category : 'bbox only';
+  el('hud').textContent=`${label} · mask ${header.semantic_pixel_area_in_bbox}px · direct ${header.semantic_track_count} · projected ${header.projected_point_count} · 3D ${header.selection_point_count} · center (${centroid})`;
 }
 async function loadHighlight(){
   if(!cloudLoaded) return loadCloud();
@@ -208,10 +211,17 @@ def colmap_images(environment_dir: Path):
     return colmap_model(environment_dir)[1]
 
 
-def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbox: list[int], category: str) -> tuple[set[int], dict]:
-    category_norm = normalize_name(category)
-    labels = cloud["category_labels"].get(category_norm)
-    if not labels:
+def selection_point_ids(
+    environment_dir: Path,
+    cloud: dict,
+    image_name: str,
+    bbox: list[int],
+    category: str | None = None,
+) -> tuple[set[int], dict]:
+    category_norm = normalize_name(category or "")
+    segmentation_applied = bool(category_norm)
+    labels = cloud["category_labels"].get(category_norm) if segmentation_applied else None
+    if segmentation_applied and not labels:
         available = ", ".join(sorted(cloud["category_labels"]))
         raise ValueError(f"Unknown segmentation category '{category}'. Available: {available}")
     cameras, images = colmap_model(environment_dir)
@@ -229,14 +239,15 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     thing = np.asarray(Image.open(thing_path))
     if stuff.shape != thing.shape:
         raise ValueError(f"stuff/thing mask shape mismatch for {image_name}")
-    semantic = np.zeros(stuff.shape, dtype=bool)
-    for item in labels:
-        source = str(item["source"])
-        label_id = int(item["label_id"])
-        if source == "thing":
-            semantic |= thing == label_id
-        elif source == "stuff":
-            semantic |= (thing == 0) & (stuff == label_id)
+    semantic = np.ones(stuff.shape, dtype=bool) if not segmentation_applied else np.zeros(stuff.shape, dtype=bool)
+    if segmentation_applied:
+        for item in labels:
+            source = str(item["source"])
+            label_id = int(item["label_id"])
+            if source == "thing":
+                semantic |= thing == label_id
+            elif source == "stuff":
+                semantic |= (thing == 0) & (stuff == label_id)
 
     height, width = semantic.shape
     x, y, w, h = [int(v) for v in bbox]
@@ -247,8 +258,7 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     if x2 <= x1 or y2 <= y1:
         raise ValueError(f"Invalid bbox: {bbox}")
 
-    bbox_semantic = semantic[y1:y2, x1:x2]
-    semantic_pixel_area = int(np.count_nonzero(bbox_semantic))
+    semantic_pixel_area = int(np.count_nonzero(semantic[y1:y2, x1:x2]))
 
     # Keep direct observations, but also project the complete reconstructed cloud
     # into this camera. The latter handles frames where the mask has pixels but
@@ -268,7 +278,6 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     rotation = qvec2rotmat(image.qvec)
     camera_xyz = (rotation @ xyz.T).T + np.asarray(image.tvec, dtype=np.float64)
     depth = camera_xyz[:, 2]
-    projected = np.zeros(len(xyz), dtype=bool)
     valid_depth = depth > 1e-6
     projected_x = np.zeros(len(xyz), dtype=np.float64)
     projected_y = np.zeros(len(xyz), dtype=np.float64)
@@ -296,7 +305,8 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     ids = direct_ids | projected_ids
     return ids, {
         "source_image": image_name,
-        "category": category_norm,
+        "category": category_norm or "bbox",
+        "segmentation_applied": segmentation_applied,
         "bbox_xywh": [x1, y1, x2 - x1, y2 - y1],
         "raw_bbox_track_count": int(np.count_nonzero(in_bbox)),
         "semantic_track_count": int(np.count_nonzero(direct_selected)),
@@ -381,7 +391,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/selection":
                 q = parse_qs(parsed.query)
                 image_name = q.get("image", [""])[0]
-                category = q.get("category", [""])[0]
+                category = q.get("category", [""])[0] or None
                 bbox_text = q.get("bbox", [""])[0]
                 try:
                     bbox = [int(float(value)) for value in bbox_text.split(",")]
