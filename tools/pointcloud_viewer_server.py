@@ -22,10 +22,11 @@ DEFAULT_PROPOSAL_DIR = REPO_ROOT / "outputs/Friends-monica_apartment/semantic_pr
 SITCOMS3D_ROOT = REPO_ROOT / "sitcoms3D"
 if str(SITCOMS3D_ROOT) not in sys.path:
     sys.path.insert(0, str(SITCOMS3D_ROOT))
-from sitcoms3D.utils.colmap_utils import read_model  # noqa: E402
+from sitcoms3D.utils.colmap_utils import qvec2rotmat, read_model  # noqa: E402
 
 _CACHE: dict[str, dict] = {}
 _COLMAP_IMAGE_CACHE: dict[str, dict] = {}
+_COLMAP_CAMERA_CACHE: dict[str, dict] = {}
 
 HTML = r"""
 <!doctype html>
@@ -133,7 +134,7 @@ async function loadSelection(){
   const hi=new Float32Array(data);
   setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
   const centroid=header.selection_centroid ? header.selection_centroid.map(v=>Number(v).toFixed(2)).join(', ') : 'n/a';
-  el('hud').textContent=`${header.category} · ${header.selection_point_count} selected 3D pts · ${header.highlight_count} drawn · center (${centroid})`;
+  el('hud').textContent=`${header.category} · mask ${header.semantic_pixel_area_in_bbox}px · direct ${header.semantic_track_count} · projected ${header.projected_point_count} · 3D ${header.selection_point_count} · center (${centroid})`;
 }
 async function loadHighlight(){
   if(!cloudLoaded) return loadCloud();
@@ -194,12 +195,17 @@ def normalize_name(name: str) -> str:
     return " ".join(name.lower().replace("_", " ").replace("-", " ").split())
 
 
-def colmap_images(environment_dir: Path):
+def colmap_model(environment_dir: Path):
     key = str(environment_dir.resolve())
     if key not in _COLMAP_IMAGE_CACHE:
-        _, images, _ = read_model(str(environment_dir / "colmap"), ext="")
+        cameras, images, _ = read_model(str(environment_dir / "colmap"), ext="")
         _COLMAP_IMAGE_CACHE[key] = images
-    return _COLMAP_IMAGE_CACHE[key]
+        _COLMAP_CAMERA_CACHE[key] = cameras
+    return _COLMAP_CAMERA_CACHE[key], _COLMAP_IMAGE_CACHE[key]
+
+
+def colmap_images(environment_dir: Path):
+    return colmap_model(environment_dir)[1]
 
 
 def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbox: list[int], category: str) -> tuple[set[int], dict]:
@@ -208,9 +214,11 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     if not labels:
         available = ", ".join(sorted(cloud["category_labels"]))
         raise ValueError(f"Unknown segmentation category '{category}'. Available: {available}")
-    image = next((item for item in colmap_images(environment_dir).values() if item.name == image_name), None)
+    cameras, images = colmap_model(environment_dir)
+    image = next((item for item in images.values() if item.name == image_name), None)
     if image is None:
         raise ValueError(f"Image not registered in COLMAP: {image_name}")
+    camera = cameras[image.camera_id]
 
     stem = Path(image_name).stem
     stuff_path = environment_dir / "segmentations" / "stuff" / f"{stem}.png"
@@ -239,6 +247,12 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     if x2 <= x1 or y2 <= y1:
         raise ValueError(f"Invalid bbox: {bbox}")
 
+    bbox_semantic = semantic[y1:y2, x1:x2]
+    semantic_pixel_area = int(np.count_nonzero(bbox_semantic))
+
+    # Keep direct observations, but also project the complete reconstructed cloud
+    # into this camera. The latter handles frames where the mask has pixels but
+    # COLMAP has few or no direct observations in that frame.
     xy = np.asarray(image.xys, dtype=np.float64)
     point_ids = np.asarray(image.point3D_ids, dtype=np.int64)
     px = np.rint(xy[:, 0]).astype(np.int64)
@@ -247,15 +261,48 @@ def selection_point_ids(environment_dir: Path, cloud: dict, image_name: str, bbo
     in_bbox = in_image & (point_ids >= 0) & (px >= x1) & (px < x2) & (py >= y1) & (py < y2)
     semantic_track = np.zeros(len(point_ids), dtype=bool)
     semantic_track[in_image] = semantic[py[in_image], px[in_image]]
-    selected = in_bbox & semantic_track
-    ids = {int(item) for item in point_ids[selected].tolist()}
+    direct_selected = in_bbox & semantic_track
+    direct_ids = {int(item) for item in point_ids[direct_selected].tolist()}
+
+    xyz = np.asarray(cloud["xyz"], dtype=np.float64)
+    rotation = qvec2rotmat(image.qvec)
+    camera_xyz = (rotation @ xyz.T).T + np.asarray(image.tvec, dtype=np.float64)
+    depth = camera_xyz[:, 2]
+    projected = np.zeros(len(xyz), dtype=bool)
+    valid_depth = depth > 1e-6
+    projected_x = np.zeros(len(xyz), dtype=np.float64)
+    projected_y = np.zeros(len(xyz), dtype=np.float64)
+    model = str(camera.model).upper()
+    params = np.asarray(camera.params, dtype=np.float64)
+    if model == "SIMPLE_PINHOLE":
+        focal, cx, cy = params[:3]
+        projected_x[valid_depth] = focal * camera_xyz[valid_depth, 0] / depth[valid_depth] + cx
+        projected_y[valid_depth] = focal * camera_xyz[valid_depth, 1] / depth[valid_depth] + cy
+    elif model == "PINHOLE":
+        fx, fy, cx, cy = params[:4]
+        projected_x[valid_depth] = fx * camera_xyz[valid_depth, 0] / depth[valid_depth] + cx
+        projected_y[valid_depth] = fy * camera_xyz[valid_depth, 1] / depth[valid_depth] + cy
+    else:
+        raise ValueError(f"Unsupported camera model for projection: {camera.model}")
+    projected_px = np.rint(projected_x).astype(np.int64)
+    projected_py = np.rint(projected_y).astype(np.int64)
+    valid_projection = valid_depth & (projected_px >= x1) & (projected_px < x2) & (projected_py >= y1) & (projected_py < y2)
+    valid_projection &= (projected_px >= 0) & (projected_px < width) & (projected_py >= 0) & (projected_py < height)
+    projected_semantic = np.zeros(len(xyz), dtype=bool)
+    projected_semantic[valid_projection] = semantic[projected_py[valid_projection], projected_px[valid_projection]]
+    projected_selected = valid_projection & projected_semantic
+    projected_ids = {int(item) for item in cloud["point_ids"][projected_selected].tolist()}
+
+    ids = direct_ids | projected_ids
     return ids, {
         "source_image": image_name,
         "category": category_norm,
         "bbox_xywh": [x1, y1, x2 - x1, y2 - y1],
         "raw_bbox_track_count": int(np.count_nonzero(in_bbox)),
-        "semantic_track_count": int(np.count_nonzero(selected)),
-        "semantic_pixel_area_in_bbox": int(np.count_nonzero(semantic[y1:y2, x1:x2])),
+        "semantic_track_count": int(np.count_nonzero(direct_selected)),
+        "projected_point_count": int(np.count_nonzero(projected_selected)),
+        "semantic_pixel_area_in_bbox": semantic_pixel_area,
+        "selection_method": "direct_colmap_tracks_union_projected_scene_points",
     }
 
 
