@@ -61,12 +61,14 @@ main { position:relative; min-width:0; }
     <div><label>Proposal</label><select id="proposal"></select></div>
     <div><label>Background sample</label><input id="sample" type="number" min="10000" max="217331" step="10000" value="120000" /></div>
     <button class="primary" id="loadBtn">Reload Cloud</button>
+    <button id="sourceBtn">Source Camera</button>
+    <button id="orbitBtn">Orbit Scene</button>
     <button id="resetBtn">Reset Camera</button>
     <div class="stats" id="stats">Loading metadata...</div>
   </div>
   <div class="legend">
-    Mouse drag rotates. Wheel zooms. Shift+drag pans.<br><br>
-    Full point cloud is rendered as small colored points. A selected proposal or image bbox ∩ segmentation region is drawn as larger yellow points with a pulse.
+    Source Camera aligns the view with the selected image's COLMAP pose. Orbit Scene returns to free inspection.<br><br>
+    Full point cloud is rendered as small colored points. A selected proposal or image bbox region is drawn as larger yellow points with a pulse.
   </div>
 </aside>
 <main><canvas id="gl"></canvas><div class="hud" id="hud">not loaded</div></main>
@@ -75,7 +77,7 @@ main { position:relative; min-width:0; }
 const el = id => document.getElementById(id);
 const canvas = el('gl');
 let gl, program, buffers = {}, meta = null;
-let camera = { rx: -0.55, ry: 0.35, tx: 0, ty: 0, dist: 12, center:[0,0,0], radius: 8 };
+let camera = { rx: -0.55, ry: 0.35, tx: 0, ty: 0, dist: 12, center:[0,0,0], radius: 8, mode:'orbit', source:null };
 let drag = null;
 let cloudLoaded = false;
 const selectionQuery = new URLSearchParams(location.search);
@@ -135,9 +137,11 @@ async function loadSelection(){
   const {header,data}=await readBinaryJson(`/api/selection?${query.toString()}`);
   const hi=new Float32Array(data);
   setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
+  camera.source = header.source_camera || null;
+  camera.mode = camera.source ? 'source' : 'orbit';
   const centroid=header.selection_centroid ? header.selection_centroid.map(v=>Number(v).toFixed(2)).join(', ') : 'n/a';
   const label = header.segmentation_applied ? header.category : 'bbox only';
-  el('hud').textContent=`${label} · mask ${header.semantic_pixel_area_in_bbox}px · direct ${header.semantic_track_count} · projected ${header.projected_point_count} · 3D ${header.selection_point_count} · center (${centroid})`;
+  el('hud').textContent=`${label} · ${camera.mode} view · mask ${header.semantic_pixel_area_in_bbox}px · direct ${header.semantic_track_count} · projected ${header.projected_point_count} · 3D ${header.selection_point_count} · center (${centroid})`;
 }
 async function loadHighlight(){
   if(!cloudLoaded) return loadCloud();
@@ -149,13 +153,29 @@ async function loadHighlight(){
   setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
   el('hud').textContent=`${proposal}: ${header.highlight_count} highlighted / ${window.currentCount} drawn`;
 }
-function mvp(){ const aspect=canvas.width/Math.max(1,canvas.height); let view=mat4Identity(); view=mat4Mul(view,translate(camera.tx,camera.ty,-camera.dist)); view=mat4Mul(view,rotateX(camera.rx)); view=mat4Mul(view,rotateY(camera.ry)); view=mat4Mul(view,translate(-camera.center[0],-camera.center[1],-camera.center[2])); return mat4Mul(perspective(Math.PI/4,aspect,0.01,1000),view); }
+function sourceViewMatrix(){
+  const r=camera.source.rotation, t=camera.source.translation;
+  // Convert COLMAP camera axes (+Z forward, +Y down) to WebGL axes (-Z forward, +Y up).
+  return [r[0][0],-r[1][0],-r[2][0],0, r[0][1],-r[1][1],-r[2][1],0, r[0][2],-r[1][2],-r[2][2],0, t[0],-t[1],-t[2],1];
+}
+function sourceProjectionMatrix(){
+  const p=camera.source.params, size=camera.source.image_size;
+  const fx=p[0], fy=camera.source.model==='PINHOLE' ? p[1] : p[0];
+  const cx=camera.source.model==='PINHOLE' ? p[2] : p[1], cy=camera.source.model==='PINHOLE' ? p[3] : p[2];
+  const near=0.01, far=1000.0;
+  const left=-cx*near/fx, right=(size[0]-cx)*near/fx;
+  const bottom=-(size[1]-cy)*near/fy, top=cy*near/fy;
+  return [2*near/(right-left),0,0,0, 0,2*near/(top-bottom),0,0, (right+left)/(right-left),(top+bottom)/(top-bottom),-(far+near)/(far-near),-1, 0,0,-2*far*near/(far-near),0];
+}
+function orbitMvp(){ const aspect=canvas.width/Math.max(1,canvas.height); let view=mat4Identity(); view=mat4Mul(view,translate(camera.tx,camera.ty,-camera.dist)); view=mat4Mul(view,rotateX(camera.rx)); view=mat4Mul(view,rotateY(camera.ry)); view=mat4Mul(view,translate(-camera.center[0],-camera.center[1],-camera.center[2])); return mat4Mul(perspective(Math.PI/4,aspect,0.01,1000),view); }
+function mvp(){ if(camera.mode==='source' && camera.source) return mat4Mul(sourceProjectionMatrix(),sourceViewMatrix()); return orbitMvp(); }
 function render(t=0){ resize(); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT); gl.useProgram(program); gl.uniformMatrix4fv(gl.getUniformLocation(program,'uMvp'),false,new Float32Array(mvp())); gl.uniform1f(gl.getUniformLocation(program,'uTime'),t/1000); gl.uniform1f(gl.getUniformLocation(program,'uPointSize'),Math.max(1.1, window.devicePixelRatio||1)); if(window.currentCount) gl.drawArrays(gl.POINTS,0,window.currentCount); requestAnimationFrame(render); }
-canvas.addEventListener('mousedown',e=>{drag={x:e.clientX,y:e.clientY,shift:e.shiftKey,rx:camera.rx,ry:camera.ry,tx:camera.tx,ty:camera.ty};});
+canvas.addEventListener('mousedown',e=>{ if(camera.mode==='source') return; drag={x:e.clientX,y:e.clientY,shift:e.shiftKey,rx:camera.rx,ry:camera.ry,tx:camera.tx,ty:camera.ty};});
 window.addEventListener('mouseup',()=>drag=null);
 window.addEventListener('mousemove',e=>{ if(!drag) return; const dx=e.clientX-drag.x, dy=e.clientY-drag.y; if(drag.shift){ camera.tx=drag.tx+dx/canvas.clientWidth*camera.radius*2; camera.ty=drag.ty-dy/canvas.clientHeight*camera.radius*2; } else { camera.ry=drag.ry+dx*0.006; camera.rx=drag.rx+dy*0.006; }});
 canvas.addEventListener('wheel',e=>{ e.preventDefault(); camera.dist*=Math.exp(e.deltaY*0.001); camera.dist=Math.max(0.1,camera.dist); },{passive:false});
-el('loadBtn').onclick=loadCloud; el('proposal').onchange=loadHighlight; el('resetBtn').onclick=()=>{camera.rx=-0.55;camera.ry=0.35;camera.tx=0;camera.ty=0;camera.dist=camera.radius*2.2;};
+function resetOrbit(){ camera.mode='orbit'; camera.rx=-0.55; camera.ry=0.35; camera.tx=0; camera.ty=0; camera.dist=camera.radius*2.2; }
+el('loadBtn').onclick=loadCloud; el('proposal').onchange=loadHighlight; el('sourceBtn').onclick=()=>{ if(camera.source) camera.mode='source'; }; el('orbitBtn').onclick=resetOrbit; el('resetBtn').onclick=()=>{ if(camera.source) camera.mode='source'; else resetOrbit(); };
 initGl(); loadMeta().then(loadCloud); requestAnimationFrame(render);
 </script>
 </body>
@@ -313,6 +333,14 @@ def selection_point_ids(
         "projected_point_count": int(np.count_nonzero(projected_selected)),
         "semantic_pixel_area_in_bbox": semantic_pixel_area,
         "selection_method": "direct_colmap_tracks_union_projected_scene_points",
+        "source_camera": {
+            "model": str(camera.model),
+            "params": np.asarray(camera.params, dtype=np.float64).tolist(),
+            "image_size": [int(width), int(height)],
+            "rotation": qvec2rotmat(image.qvec).astype(float).tolist(),
+            "translation": np.asarray(image.tvec, dtype=np.float64).astype(float).tolist(),
+            "center": (-qvec2rotmat(image.qvec).T @ np.asarray(image.tvec, dtype=np.float64)).astype(float).tolist(),
+        },
     }
 
 
