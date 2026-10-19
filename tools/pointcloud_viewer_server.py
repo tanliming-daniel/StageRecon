@@ -19,6 +19,7 @@ from plyfile import PlyData
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV = REPO_ROOT / "sitcoms3D/data/sparse_reconstruction_and_nerf_data/Friends-monica_apartment"
 DEFAULT_PROPOSAL_DIR = REPO_ROOT / "outputs/Friends-monica_apartment/semantic_proposals_instances"
+DEFAULT_LOCALIZATION = REPO_ROOT / "outputs/Friends-monica_apartment/new_image_localization/localization_raw_colmap.json"
 SITCOMS3D_ROOT = REPO_ROOT / "sitcoms3D"
 if str(SITCOMS3D_ROOT) not in sys.path:
     sys.path.insert(0, str(SITCOMS3D_ROOT))
@@ -63,6 +64,8 @@ main { position:relative; min-width:0; }
     <button class="primary" id="loadBtn">Reload Cloud</button>
     <button id="sourceBtn">Source Camera</button>
     <button id="orbitBtn">Orbit Scene</button>
+    <button id="poseBtn" disabled>Predicted Camera</button>
+    <button id="focusPoseBtn" disabled>Focus Predicted Camera</button>
     <button id="resetBtn">Reset Camera</button>
     <div class="stats" id="stats">Loading metadata...</div>
   </div>
@@ -80,6 +83,8 @@ let gl, program, buffers = {}, meta = null;
 let camera = { rx: -0.55, ry: 0.35, tx: 0, ty: 0, dist: 12, center:[0,0,0], radius: 8, mode:'orbit', source:null };
 let drag = null;
 let cloudLoaded = false;
+let predictedCamera = null;
+let showPredictedCamera = true;
 const selectionQuery = new URLSearchParams(location.search);
 const imageSelection = {
   image: selectionQuery.get('image'),
@@ -127,21 +132,48 @@ function compile(type, src){ const sh=gl.createShader(type); gl.shaderSource(sh,
 function initGl(){ gl=canvas.getContext('webgl',{antialias:true}); if(!gl) throw new Error('WebGL unavailable'); program=gl.createProgram(); gl.attachShader(program,compile(gl.VERTEX_SHADER,vs)); gl.attachShader(program,compile(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(program); if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program)); gl.useProgram(program); gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.clearColor(0.035,0.043,0.06,1); }
 function resize(){ const dpr=window.devicePixelRatio||1; const w=Math.floor(canvas.clientWidth*dpr), h=Math.floor(canvas.clientHeight*dpr); if(canvas.width!==w||canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h); } }
 function setBuffer(name, data, size, usage=gl.STATIC_DRAW){ let b=buffers[name]; if(!b){ b=gl.createBuffer(); buffers[name]=b; } gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,data,usage); const loc=gl.getAttribLocation(program,name); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,size,gl.FLOAT,false,0,0); }
-async function loadMeta(){ meta=await (await fetch('/api/state')).json(); el('proposal').innerHTML=meta.proposals.map(p=>`<option value="${p.id}">${p.id} · ${p.category} · ${p.point_count} pts</option>`).join(''); el('stats').textContent=`${meta.point_count} points, ${meta.proposals.length} proposals`; }
+async function loadMeta(){ meta=await (await fetch('/api/state')).json(); el('proposal').innerHTML=meta.proposals.map(p=>`<option value="${p.id}">${p.id} · ${p.category} · ${p.point_count} pts</option>`).join(''); const pose=meta.predicted_camera; const poseText=pose && pose.available ? ` · pose ${pose.query_key}` : ''; el('stats').textContent=`${meta.point_count} points, ${meta.proposals.length} proposals${poseText}`; }
 async function readBinaryJson(url){ const res=await fetch(url); const headerLen=Number(res.headers.get('X-Header-Length')); const buf=await res.arrayBuffer(); const header=JSON.parse(new TextDecoder().decode(buf.slice(0,headerLen))); return {header, data:buf.slice(headerLen)}; }
-async function loadCloud(){ const sample=Number(el('sample').value||120000); el('hud').textContent='loading point cloud...'; const {header,data}=await readBinaryJson(`/api/cloud?sample=${sample}`); const n=header.count; const floats=new Float32Array(data); const pos=floats.slice(0,n*3); const col=floats.slice(n*3,n*6); setBuffer('aPosition',pos,3); setBuffer('aColor',col,3); window.currentCount=n; camera.center=header.center; camera.radius=header.radius; camera.dist=header.radius*2.2; camera.tx=0; camera.ty=0; cloudLoaded=true; await loadHighlight(); }
+function posePointCount(){ return showPredictedCamera && predictedCamera ? predictedCamera.point_positions.length / 3 : 0; }
+function appendPoseCloud(pos, col){
+  const count=posePointCount();
+  if(!count) return {pos, col};
+  const posePos=new Float32Array(predictedCamera.point_positions);
+  const poseCol=new Float32Array(predictedCamera.point_colors);
+  const mergedPos=new Float32Array(pos.length+posePos.length);
+  const mergedCol=new Float32Array(col.length+poseCol.length);
+  mergedPos.set(pos); mergedPos.set(posePos,pos.length);
+  mergedCol.set(col); mergedCol.set(poseCol,col.length);
+  return {pos:mergedPos, col:mergedCol};
+}
+function appendPoseHighlight(highlight){
+  const count=posePointCount();
+  if(!count) return highlight;
+  const merged=new Float32Array(highlight.length+count);
+  merged.set(highlight); merged.fill(1,highlight.length);
+  return merged;
+}
+async function loadPredictedCamera(){
+  const pose=await (await fetch('/api/predicted-camera')).json();
+  if(!pose.available) return;
+  predictedCamera=pose;
+  el('poseBtn').disabled=false;
+  el('focusPoseBtn').disabled=false;
+  el('poseBtn').textContent='Hide Predicted Camera';
+}
+async function loadCloud(){ const sample=Number(el('sample').value||120000); el('hud').textContent='loading point cloud...'; const {header,data}=await readBinaryJson(`/api/cloud?sample=${sample}`); const n=header.count; const floats=new Float32Array(data); const basePos=floats.slice(0,n*3); const baseCol=floats.slice(n*3,n*6); const merged=appendPoseCloud(basePos,baseCol); setBuffer('aPosition',merged.pos,3); setBuffer('aColor',merged.col,3); window.currentCount=n+posePointCount(); camera.center=header.center; camera.radius=header.radius; camera.dist=header.radius*2.2; camera.tx=0; camera.ty=0; cloudLoaded=true; await loadHighlight(); }
 async function loadSelection(){
   const sample=Number(el('sample').value||120000);
   const query=new URLSearchParams({image:imageSelection.image,bbox:imageSelection.bbox,mode:imageSelection.mode,sample:String(sample)});
   if(imageSelection.category) query.set('category', imageSelection.category);
   const {header,data}=await readBinaryJson(`/api/selection?${query.toString()}`);
   const hi=new Float32Array(data);
-  setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
+  setBuffer('aHighlight',appendPoseHighlight(hi),1,gl.DYNAMIC_DRAW);
   camera.source = header.source_camera || null;
   camera.mode = camera.source ? 'source' : 'orbit';
   const centroid=header.selection_centroid ? header.selection_centroid.map(v=>Number(v).toFixed(2)).join(', ') : 'n/a';
   const label = header.segmentation_applied ? header.category : 'bbox only';
-  el('hud').textContent=`${label} · ${camera.mode} view · mask ${header.semantic_pixel_area_in_bbox}px · direct ${header.semantic_track_count} · projected ${header.projected_point_count} · 3D ${header.selection_point_count} · center (${centroid})`;
+  el('hud').textContent=`${label} · ${camera.mode} view · mask ${header.semantic_pixel_area_in_bbox}px · direct ${header.semantic_track_count} · visible ${header.visible_projected_count} · 3D ${header.selection_point_count} · center (${centroid})`;
 }
 async function loadHighlight(){
   if(!cloudLoaded) return loadCloud();
@@ -150,7 +182,7 @@ async function loadHighlight(){
   const sample=Number(el('sample').value||120000);
   const {header,data}=await readBinaryJson(`/api/highlight?proposal=${encodeURIComponent(proposal)}&sample=${sample}`);
   const hi=new Float32Array(data);
-  setBuffer('aHighlight',hi,1,gl.DYNAMIC_DRAW);
+  setBuffer('aHighlight',appendPoseHighlight(hi),1,gl.DYNAMIC_DRAW);
   el('hud').textContent=`${proposal}: ${header.highlight_count} highlighted / ${window.currentCount} drawn`;
 }
 function sourceViewMatrix(){
@@ -169,14 +201,32 @@ function sourceProjectionMatrix(){
 }
 function orbitMvp(){ const aspect=canvas.width/Math.max(1,canvas.height); let view=mat4Identity(); view=mat4Mul(view,translate(camera.tx,camera.ty,-camera.dist)); view=mat4Mul(view,rotateX(camera.rx)); view=mat4Mul(view,rotateY(camera.ry)); view=mat4Mul(view,translate(-camera.center[0],-camera.center[1],-camera.center[2])); return mat4Mul(perspective(Math.PI/4,aspect,0.01,1000),view); }
 function mvp(){ if(camera.mode==='source' && camera.source) return mat4Mul(sourceProjectionMatrix(),sourceViewMatrix()); return orbitMvp(); }
-function render(t=0){ resize(); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT); gl.useProgram(program); gl.uniformMatrix4fv(gl.getUniformLocation(program,'uMvp'),false,new Float32Array(mvp())); gl.uniform1f(gl.getUniformLocation(program,'uTime'),t/1000); gl.uniform1f(gl.getUniformLocation(program,'uPointSize'),Math.max(1.1, window.devicePixelRatio||1)); if(window.currentCount) gl.drawArrays(gl.POINTS,0,window.currentCount); requestAnimationFrame(render); }
+function setRenderViewport(){
+  const w=canvas.width, h=canvas.height;
+  if(camera.mode==='source' && camera.source){
+    const target=camera.source.image_size[0]/camera.source.image_size[1];
+    const current=w/Math.max(1,h);
+    if(current>target){ const vw=Math.floor(h*target); gl.viewport(Math.floor((w-vw)/2),0,vw,h); }
+    else { const vh=Math.floor(w/target); gl.viewport(0,Math.floor((h-vh)/2),w,vh); }
+  } else gl.viewport(0,0,w,h);
+}
+function render(t=0){
+  resize();
+  gl.viewport(0,0,canvas.width,canvas.height);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  setRenderViewport();
+  gl.useProgram(program);
+  gl.uniformMatrix4fv(gl.getUniformLocation(program,'uMvp'),false,new Float32Array(mvp()));
+  gl.uniform1f(gl.getUniformLocation(program,'uTime'),t/1000);
+  gl.uniform1f(gl.getUniformLocation(program,'uPointSize'),Math.max(1.1, window.devicePixelRatio||1));
+  if(window.currentCount) gl.drawArrays(gl.POINTS,0,window.currentCount);
+  requestAnimationFrame(render);
+}
 canvas.addEventListener('mousedown',e=>{ if(camera.mode==='source') return; drag={x:e.clientX,y:e.clientY,shift:e.shiftKey,rx:camera.rx,ry:camera.ry,tx:camera.tx,ty:camera.ty};});
 window.addEventListener('mouseup',()=>drag=null);
 window.addEventListener('mousemove',e=>{ if(!drag) return; const dx=e.clientX-drag.x, dy=e.clientY-drag.y; if(drag.shift){ camera.tx=drag.tx+dx/canvas.clientWidth*camera.radius*2; camera.ty=drag.ty-dy/canvas.clientHeight*camera.radius*2; } else { camera.ry=drag.ry+dx*0.006; camera.rx=drag.rx+dy*0.006; }});
 canvas.addEventListener('wheel',e=>{ e.preventDefault(); camera.dist*=Math.exp(e.deltaY*0.001); camera.dist=Math.max(0.1,camera.dist); },{passive:false});
-function resetOrbit(){ camera.mode='orbit'; camera.rx=-0.55; camera.ry=0.35; camera.tx=0; camera.ty=0; camera.dist=camera.radius*2.2; }
-el('loadBtn').onclick=loadCloud; el('proposal').onchange=loadHighlight; el('sourceBtn').onclick=()=>{ if(camera.source) camera.mode='source'; }; el('orbitBtn').onclick=resetOrbit; el('resetBtn').onclick=()=>{ if(camera.source) camera.mode='source'; else resetOrbit(); };
-initGl(); loadMeta().then(loadCloud); requestAnimationFrame(render);
+function focusPredictedCamera(){  if(!predictedCamera) return;  const poseCenter=predictedCamera.camera_center;  const cloudCenter=camera.center;  const separation=Math.hypot(...poseCenter.map((v,i)=>v-cloudCenter[i]));  camera.mode='orbit';  camera.center=poseCenter.map((v,i)=>(v+cloudCenter[i])*0.5);  camera.radius=Math.max(camera.radius,separation*0.7);  camera.dist=Math.max(camera.radius*1.8,predictedCamera.frustum_depth*7);  camera.tx=0; camera.ty=0;}function resetOrbit(){ camera.mode='orbit'; camera.rx=-0.55; camera.ry=0.35; camera.tx=0; camera.ty=0; camera.dist=camera.radius*2.2; }el('loadBtn').onclick=loadCloud; el('proposal').onchange=loadHighlight; el('sourceBtn').onclick=()=>{ if(camera.source) camera.mode='source'; }; el('orbitBtn').onclick=resetOrbit; el('resetBtn').onclick=()=>{ if(camera.source) camera.mode='source'; else resetOrbit(); }; el('poseBtn').onclick=async()=>{ showPredictedCamera=!showPredictedCamera; el('poseBtn').textContent=showPredictedCamera?'Hide Predicted Camera':'Show Predicted Camera'; await loadCloud(); }; el('focusPoseBtn').onclick=focusPredictedCamera;initGl(); loadMeta().then(loadPredictedCamera).then(loadCloud); requestAnimationFrame(render);
 </script>
 </body>
 </html>
@@ -320,7 +370,20 @@ def selection_point_ids(
     projected_semantic = np.zeros(len(xyz), dtype=bool)
     projected_semantic[valid_projection] = semantic[projected_py[valid_projection], projected_px[valid_projection]]
     projected_selected = valid_projection & projected_semantic
-    projected_ids = {int(item) for item in cloud["point_ids"][projected_selected].tolist()}
+    candidate_indices = np.flatnonzero(projected_selected)
+    if len(candidate_indices):
+        # Approximate a z-buffer on a small image grid. Keeping only the nearest
+        # point per cell removes background surfaces behind the selected region.
+        cell_size = 4
+        grid_width = (width + cell_size - 1) // cell_size
+        cell_keys = (projected_py[candidate_indices] // cell_size) * grid_width + projected_px[candidate_indices] // cell_size
+        order = candidate_indices[np.argsort(depth[candidate_indices])]
+        ordered_keys = (projected_py[order] // cell_size) * grid_width + projected_px[order] // cell_size
+        _, first = np.unique(ordered_keys, return_index=True)
+        visible_indices = order[first]
+    else:
+        visible_indices = np.empty(0, dtype=np.int64)
+    projected_ids = {int(item) for item in cloud["point_ids"][visible_indices].tolist()}
 
     ids = direct_ids | projected_ids
     return ids, {
@@ -330,7 +393,9 @@ def selection_point_ids(
         "bbox_xywh": [x1, y1, x2 - x1, y2 - y1],
         "raw_bbox_track_count": int(np.count_nonzero(in_bbox)),
         "semantic_track_count": int(np.count_nonzero(direct_selected)),
-        "projected_point_count": int(np.count_nonzero(projected_selected)),
+        "projected_candidate_count": int(np.count_nonzero(projected_selected)),
+        "projected_point_count": int(len(visible_indices)),
+        "visible_projected_count": int(len(visible_indices)),
         "semantic_pixel_area_in_bbox": semantic_pixel_area,
         "selection_method": "direct_colmap_tracks_union_projected_scene_points",
         "source_camera": {
@@ -367,9 +432,11 @@ def binary_response_arrays(header: dict, arrays: list[np.ndarray]) -> tuple[byte
     return header_bytes + body, len(header_bytes)
 
 
+def predicted_camera_payload(localization_path: Path, cloud: dict) -> dict: data = json.loads(localization_path.read_text()); rotation = np.asarray(data["world_to_camera_rotation"], dtype=np.float64); translation = np.asarray(data["world_to_camera_translation"], dtype=np.float64); intrinsics = np.asarray(data["pnp"]["intrinsics"], dtype=np.float64); center = np.asarray(data.get("camera_center", -rotation.T @ translation), dtype=np.float64); depth = float(np.clip(cloud["radius"] * 0.12, 0.35, 1.0)); fx, fy, cx, cy = intrinsics[0, 0], intrinsics[1, 1], intrinsics[0, 2], intrinsics[1, 2]; camera_corners = np.asarray([[-cx / fx * depth, -cy / fy * depth, depth], [cx / fx * depth, -cy / fy * depth, depth], [cx / fx * depth, cy / fy * depth, depth], [-cx / fx * depth, cy / fy * depth, depth]], dtype=np.float64); corners = (rotation.T @ camera_corners.T).T + center; segments = np.asarray([(center, corner) for corner in corners] + [(corners[i], corners[(i + 1) % 4]) for i in range(4)] + [(center, center + rotation.T @ np.asarray([0.0, 0.0, depth * 1.35]))]); alpha = np.linspace(0.0, 1.0, 20, dtype=np.float64)[None, :, None]; positions = (segments[:, 0, None, :] + (segments[:, 1, None, :] - segments[:, 0, None, :]) * alpha).reshape(-1, 3); colors = np.tile(np.asarray([1.0, 0.36, 0.05]), (len(positions), 1)); return {"available": True, "query_key": str(data.get("query_key", localization_path.stem)), "query_image": data.get("query_image"), "camera_center": center.astype(float).tolist(), "frustum_depth": depth, "point_positions": positions.astype(float).reshape(-1).tolist(), "point_colors": colors.astype(float).reshape(-1).tolist(), "pnp_inliers": int(data.get("pnp", {}).get("inlier_count", 0)), "pnp_rmse_pixels": float(data.get("pnp", {}).get("inlier_rmse_pixels", 0.0))}
 class ViewerHandler(BaseHTTPRequestHandler):
     proposal_dir: Path
     environment_dir: Path
+    localization_path: Path
 
     def log_message(self, fmt: str, *args: object) -> None:
         sys.stderr.write("[pointcloud-viewer] " + fmt % args + "\n")
@@ -393,9 +460,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
             if parsed.path in ("/", "/index.html"):
                 self.send_bytes(HTML.encode(), "text/html; charset=utf-8")
                 return
+            if parsed.path == '/api/predicted-camera':
+                cloud = load_cloud(self.proposal_dir)
+                self.send_json(predicted_camera_payload(self.localization_path, cloud))
+                return
             cloud = load_cloud(self.proposal_dir)
             if parsed.path == "/api/state":
                 self.send_json({
+                    "predicted_camera": {"available": self.localization_path.exists(), "query_key": self.localization_path.stem},
                     "point_count": int(len(cloud["xyz"])),
                     "proposals": [
                         {"id": p["id"], "category": p["category"], "point_count": p["point_count"]}
@@ -477,6 +549,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a WebGL point cloud proposal viewer.")
     parser.add_argument("--environment-dir", type=Path, default=DEFAULT_ENV)
     parser.add_argument("--proposal-dir", type=Path, default=DEFAULT_PROPOSAL_DIR)
+    parser.add_argument("--localization", type=Path, default=DEFAULT_LOCALIZATION)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8017)
     return parser
@@ -486,10 +559,12 @@ def main() -> None:
     args = make_parser().parse_args()
     ViewerHandler.environment_dir = args.environment_dir.resolve()
     ViewerHandler.proposal_dir = args.proposal_dir.resolve()
+    ViewerHandler.localization_path = args.localization.resolve()
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((args.host, args.port), ViewerHandler)
     print(f"Point cloud viewer: http://{args.host}:{args.port}")
     print(f"Proposal dir: {ViewerHandler.proposal_dir}")
+    print(f"Localization: {ViewerHandler.localization_path}")
     server.serve_forever()
 
 

@@ -3,11 +3,26 @@ outputs/
 results/
 asset_scene/
 semantic_outputs/
+data/
+assets/
+
+# Third-party working trees are submodules. Keep other local experiments out.
+external/*
+!external/OmniShotCut
 
 # Python/runtime noise
 __pycache__/
 *.py[cod]
 .DS_Store
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+.idea/
+.vscode/
 
 # Large local archives/checkpoints kept outside the parent repo
 *.zip
@@ -18,3 +33,12 @@ __pycache__/
 *.pth
 *.pt
 *.safetensors
+*.blend
+*.blend1
+*.blend2
+*.h5
+*.npz
+*.npy
+*.db
+*.mp4
+*.mkv

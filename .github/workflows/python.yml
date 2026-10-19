@@ -1,0 +1,22 @@
+name: Python source checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check whitespace
+        run: git diff --check
+      - name: Compile Python sources
+        run: python -m compileall -q tools
+      - name: Check portable render CLIs
+        run: |
+          python tools/clip_render_job.py --help
+          python tools/run_clip_render_job.py --help

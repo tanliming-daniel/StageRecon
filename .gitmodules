@@ -1,7 +1,11 @@
 [submodule "ShowMak3r"]
 	path = ShowMak3r
-	url = https://githubfast.com/nstar1125/ShowMak3r.git
+	url = https://github.com/nstar1125/ShowMak3r.git
 
 [submodule "sitcoms3D"]
 	path = sitcoms3D
-	url = https://githubfast.com/ethanweber/sitcoms3D.git
+	url = https://github.com/ethanweber/sitcoms3D.git
+
+[submodule "external/OmniShotCut"]
+	path = external/OmniShotCut
+	url = https://github.com/UVA-Computer-Vision-Lab/OmniShotCut.git
