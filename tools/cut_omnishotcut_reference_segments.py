@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cut OmniShotCut segments containing numbered reference images.
+"""Cut only OmniShotCut segments supported by target-scene images.
 
 General shots and transition segments are written to separate folders so gradual
 transitions are never silently treated as clean camera shots.
@@ -87,12 +87,19 @@ def main() -> int:
     fps, stream_start = probe(args.video)
     segments = read_csv(args.segments_csv)
     image_map = read_csv(args.image_map_csv)
+    if not image_map:
+        raise RuntimeError("Image map is empty; refusing to cut full-video segments")
     segments_by_index = {int(row["shot_index"]): row for row in segments}
     images_by_segment: dict[int, list[dict[str, str]]] = defaultdict(list)
     for row in image_map:
         images_by_segment[int(row["shot_index"])].append(row)
 
     selected_indices = sorted(images_by_segment)
+    missing_indices = [index for index in selected_indices if index not in segments_by_index]
+    if missing_indices:
+        raise RuntimeError(
+            f"Image map references segments absent from --segments-csv: {missing_indices}"
+        )
     selected_rows: list[dict[str, object]] = []
     clip_by_segment: dict[int, tuple[str, int]] = {}
     jobs: list[tuple[Path, float, float]] = []
@@ -162,6 +169,7 @@ def main() -> int:
         )
 
     write_csv(args.output_dir / "selected_segments.csv", selected_rows)
+    write_csv(args.output_dir / "target_scene_segments.csv", selected_rows)
     write_csv(args.output_dir / "image_to_clip.csv", mapped_rows)
 
     completed = 0
