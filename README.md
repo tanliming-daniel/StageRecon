@@ -45,6 +45,11 @@ through the command-line options documented in each tool. The checked-in
 defaults reflect the development machine and are examples rather than portable
 installation paths.
 
+Service endpoints and credentials must be supplied at runtime. Do not commit
+API keys or private deployment addresses to source files or documentation. For
+the optional Qwen image-reference tools, use IMAGE_API_URL and IMAGE_API_KEY,
+or pass the corresponding CLI options.
+
 ## Clip analysis and rendering
 
 Generate tracking data without building a final animated Blender scene:

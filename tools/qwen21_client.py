@@ -18,9 +18,6 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-DEFAULT_URL = "http://42.193.117.211:18083"
-
-
 def request(url: str, api_key: str, *, method: str = "GET", data: bytes | None = None, content_type: str | None = None) -> bytes:
     headers = {"Authorization": f"Bearer {api_key}"}
     if content_type:
@@ -114,13 +111,15 @@ def main() -> int:
     parser.add_argument("--idempotency-key")
     parser.add_argument("--model", choices=("qwen",), default="qwen")
     parser.add_argument("--output", type=Path, default=Path("result.png"))
-    parser.add_argument("--url", default=os.getenv("IMAGE_API_URL", DEFAULT_URL))
+    parser.add_argument("--url", default=os.getenv("IMAGE_API_URL"))
     parser.add_argument("--api-key", default=os.getenv("IMAGE_API_KEY"))
     parser.add_argument("--poll-interval", type=float, default=5.0)
     args = parser.parse_args()
 
     if not args.api_key:
         parser.error("set IMAGE_API_KEY or pass --api-key")
+    if not args.url:
+        parser.error("set IMAGE_API_URL or pass --url")
     for image in args.image or []:
         if not image.is_file():
             parser.error(f"image does not exist: {image}")

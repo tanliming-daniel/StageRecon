@@ -8,7 +8,6 @@ import hashlib
 import io
 import json
 import os
-import re
 import threading
 import time
 import uuid
@@ -23,8 +22,6 @@ from qwen21_client import request, submit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_GALLERY = REPO_ROOT / "data/raw/friends_gallery"
-DEFAULT_DOC = REPO_ROOT / "tools/服务商负载并发优化说明.md"
-DEFAULT_URL = "http://60.171.65.125:30141"
 OUTPUT_NAME = "reference_bank.png"
 METADATA_NAME = "reference_bank.json"
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -40,8 +37,7 @@ PROMPT = """基于输入参考图中的同一个人物，生成一张干净、�
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gallery", type=Path, default=DEFAULT_GALLERY)
-    parser.add_argument("--credentials-doc", type=Path, default=DEFAULT_DOC)
-    parser.add_argument("--url", default=os.getenv("IMAGE_API_URL", DEFAULT_URL))
+    parser.add_argument("--url", default=os.getenv("IMAGE_API_URL"))
     parser.add_argument("--api-key", default=os.getenv("IMAGE_API_KEY"))
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--width", type=int, default=1920)
@@ -64,13 +60,7 @@ def parse_args() -> argparse.Namespace:
 def resolve_api_key(args: argparse.Namespace) -> str:
     if args.api_key:
         return args.api_key.strip()
-    text = args.credentials_doc.read_text(encoding="utf-8")
-    match = re.search(r"API_+KEY\s*=\s*([^\s]+)", text)
-    if not match:
-        raise RuntimeError(
-            "No API key found. Set IMAGE_API_KEY, pass --api-key, or update the credentials doc."
-        )
-    return match.group(1)
+    raise RuntimeError("No API key found. Set IMAGE_API_KEY or pass --api-key.")
 
 
 def source_images(person_dir: Path) -> list[Path]:
@@ -267,6 +257,8 @@ def main() -> int:
     if args.dry_run or not pending:
         return 0
 
+    if not args.url:
+        raise SystemExit("Set IMAGE_API_URL or pass --url.")
     api_key = resolve_api_key(args)
     counters = {"generated": 0, "skipped": 0, "failed": 0}
     counter_lock = threading.Lock()
