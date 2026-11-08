@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stagerecon.local/schemas/character_registry_v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "registry_version", "characters"],
+  "properties": {
+    "schema_version": {"const": "character_registry_v1"},
+    "registry_version": {"type": "string", "minLength": 1},
+    "characters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canonical_identity", "display_name", "gallery"],
+        "properties": {
+          "canonical_identity": {"type": "string", "minLength": 1},
+          "display_name": {"type": "string", "minLength": 1},
+          "gallery": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path"],
+              "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "season": {"type": ["integer", "null"]},
+                "view": {"type": ["string", "null"]},
+                "quality": {"type": ["string", "null"]}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

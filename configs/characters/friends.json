@@ -1,0 +1,12 @@
+{
+  "schema_version": "character_registry_v1",
+  "registry_version": "friends_v1",
+  "characters": [
+    {"canonical_identity": "friends:monica", "display_name": "Monica", "gallery": []},
+    {"canonical_identity": "friends:rachel", "display_name": "Rachel", "gallery": []},
+    {"canonical_identity": "friends:phoebe", "display_name": "Phoebe", "gallery": []},
+    {"canonical_identity": "friends:ross", "display_name": "Ross", "gallery": []},
+    {"canonical_identity": "friends:chandler", "display_name": "Chandler", "gallery": []},
+    {"canonical_identity": "friends:joey", "display_name": "Joey", "gallery": []}
+  ]
+}

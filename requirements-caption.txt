@@ -1,0 +1,8 @@
+# Core StageRecon clip tools already require numpy and OpenCV.
+numpy>=1.24
+opencv-python>=4.8
+jsonschema>=4.20
+
+# Optional production identity backend (install with a matching onnxruntime build):
+# insightface>=0.7.3
+# onnxruntime-gpu>=1.18

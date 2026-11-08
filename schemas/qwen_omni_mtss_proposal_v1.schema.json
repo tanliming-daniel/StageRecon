@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stagerecon.local/schemas/qwen_omni_mtss_proposal_v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["references", "shots", "events", "global"],
+  "properties": {
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref_id", "semantic_description", "id_features", "attributes", "confidence"],
+        "properties": {
+          "ref_id": {"type": "string"},
+          "semantic_description": {"type": "string", "minLength": 1},
+          "id_features": {"type": "string", "minLength": 1},
+          "attributes": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["clothing", "hairstyle", "accessories"],
+            "properties": {
+              "clothing": {"type": ["string", "null"]},
+              "hairstyle": {"type": ["string", "null"]},
+              "accessories": {"type": ["string", "null"]}
+            }
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "shots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["shot_id", "start_sec", "end_sec", "visual_description", "camera", "references_in_shot", "active_event_ids", "confidence"],
+        "properties": {
+          "shot_id": {"type": "string", "pattern": "^SHOT_[0-9]+$"},
+          "start_sec": {"type": "number", "minimum": 0},
+          "end_sec": {"type": "number", "exclusiveMinimum": 0},
+          "visual_description": {"type": "string", "minLength": 1},
+          "camera": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["shot_type", "angle", "movement"],
+            "properties": {
+              "shot_type": {"type": ["string", "null"]},
+              "angle": {"type": ["string", "null"]},
+              "movement": {"type": ["string", "null"]}
+            }
+          },
+          "references_in_shot": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "active_event_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_id", "type", "start_sec", "end_sec", "speaker", "line", "description", "speaker_evidence", "confidence"],
+        "properties": {
+          "event_id": {"type": "string", "pattern": "^EVENT_[0-9]+$"},
+          "type": {"enum": ["dialogue", "sfx", "music"]},
+          "start_sec": {"type": "number", "minimum": 0},
+          "end_sec": {"type": "number", "exclusiveMinimum": 0},
+          "speaker": {"type": ["string", "null"]},
+          "line": {"type": ["string", "null"]},
+          "description": {"type": ["string", "null"]},
+          "speaker_evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["visible_on_screen", "mouth_activity", "voice_continuity"],
+            "properties": {
+              "visible_on_screen": {"type": ["boolean", "null"]},
+              "mouth_activity": {"type": ["boolean", "null"]},
+              "voice_continuity": {"type": ["boolean", "null"]}
+            }
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "global": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scene_description", "global_style", "global_audio"],
+      "properties": {
+        "scene_description": {"type": "string", "minLength": 1},
+        "global_style": {"type": "string", "minLength": 1},
+        "global_audio": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["background_music", "ambient_sound"],
+          "properties": {
+            "background_music": {"type": ["string", "null"]},
+            "ambient_sound": {"type": ["string", "null"]}
+          }
+        }
+      }
+    }
+  }
+}

@@ -36,6 +36,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--overlap", type=int, default=10)
+    parser.add_argument(
+        "--allow-empty-targets",
+        action="store_true",
+        help=(
+            "Run full-video shot detection even when the selected episode has "
+            "no target-scene reference images. Target manifests are written "
+            "with headers and zero rows; no clips should be cut from them."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -61,6 +70,7 @@ def episode_key(value: str) -> str | None:
 
 def collect_target_images(
     image_dir: Path, image_glob: str, video: Path, explicit_episode: str | None,
+    allow_empty: bool = False,
 ) -> tuple[str, list[tuple[int, Path]]]:
     candidates: list[tuple[str | None, int, Path]] = []
     for image_path in sorted(image_dir.glob(image_glob)):
@@ -71,11 +81,6 @@ def collect_target_images(
             continue
         candidates.append(
             (episode_key(image_path.stem), int(number_match.group(1)), image_path)
-        )
-
-    if not candidates:
-        raise RuntimeError(
-            f"No numbered target-scene images matching {image_glob!r} in {image_dir}"
         )
 
     requested_episode = episode_key(explicit_episode or "")
@@ -93,12 +98,21 @@ def collect_target_images(
             )
         selected_episode = available_episodes[0]
 
+    if not candidates:
+        if allow_empty:
+            return selected_episode, []
+        raise RuntimeError(
+            f"No numbered target-scene images matching {image_glob!r} in {image_dir}"
+        )
+
     selected = [
         (image_number, image_path)
         for key, image_number, image_path in candidates
         if key == selected_episode
     ]
     if not selected:
+        if allow_empty:
+            return selected_episode, []
         raise RuntimeError(
             f"No target-scene images for {selected_episode} in {image_dir}; "
             f"available episodes: {available_episodes}"
@@ -110,7 +124,8 @@ def main() -> int:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     selected_episode, target_images = collect_target_images(
-        args.image_dir, args.image_glob, args.video, args.episode
+        args.image_dir, args.image_glob, args.video, args.episode,
+        allow_empty=args.allow_empty_targets,
     )
     print(
         f"target_scene episode={selected_episode} images={len(target_images)}",
@@ -200,15 +215,30 @@ def main() -> int:
     # the target scene so downstream jobs cannot accidentally process the rest
     # of the episode.
     write_csv(args.output_dir / "all_segments.csv", shot_rows)
-    write_csv(args.output_dir / "image_to_segment.csv", image_rows)
-    write_csv(args.output_dir / "target_scene_segments.csv", target_scene_rows)
+    image_fields = [
+        "image_name", "episode", "image_number_one_based",
+        "video_frame_zero_based", "video_timestamp_seconds", "shot_index",
+        "shot_start_frame_zero_based", "shot_end_frame_exclusive_zero_based",
+        "frame_offset_in_shot", "intra_label", "inter_label", "is_clean_shot",
+    ]
+    target_fields = list(shot_rows[0]) + [
+        "episode", "target_scene_reference_image_count",
+    ]
+    write_csv(
+        args.output_dir / "image_to_segment.csv", image_rows,
+        fieldnames=image_fields,
+    )
+    write_csv(
+        args.output_dir / "target_scene_segments.csv", target_scene_rows,
+        fieldnames=target_fields,
+    )
     clean_target_rows = [
         row for row in target_scene_rows if row["is_clean_shot"] == "yes"
     ]
     write_csv(
         args.output_dir / "clean_shots.csv",
         clean_target_rows,
-        fieldnames=list(target_scene_rows[0]),
+        fieldnames=target_fields,
     )
     target_payload = {
         "scope": "target_scene_only",

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stagerecon.local/schemas/qwen_visual_proposal_v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["references", "shot", "global"],
+  "properties": {
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref_id", "semantic_description", "id_features", "attributes", "confidence"],
+        "properties": {
+          "ref_id": {"type": "string"},
+          "semantic_description": {"type": "string", "minLength": 1},
+          "id_features": {"type": "string", "minLength": 1},
+          "attributes": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["clothing", "hairstyle", "accessories"],
+            "properties": {
+              "clothing": {"type": ["string", "null"]},
+              "hairstyle": {"type": ["string", "null"]},
+              "accessories": {"type": ["string", "null"]}
+            }
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "shot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description_segments", "camera", "references_in_shot", "confidence"],
+      "properties": {
+        "description_segments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["observation_id", "description"],
+            "properties": {
+              "observation_id": {"type": "string"},
+              "description": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "camera": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shot_type", "angle", "movement"],
+          "properties": {
+            "shot_type": {"type": ["string", "null"]},
+            "angle": {"type": ["string", "null"]},
+            "movement": {"type": ["string", "null"]}
+          }
+        },
+        "references_in_shot": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string"}
+        },
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "global": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scene_description", "global_style", "ambient_sound"],
+      "properties": {
+        "scene_description": {"type": "string", "minLength": 1},
+        "global_style": {"type": "string", "minLength": 1},
+        "ambient_sound": {"type": ["string", "null"]}
+      }
+    }
+  }
+}

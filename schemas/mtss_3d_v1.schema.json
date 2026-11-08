@@ -1,0 +1,465 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stagerecon.local/schemas/mtss_3d_v1.schema.json",
+  "title": "StageRecon MTSS-3D v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "sample_id",
+    "sequence_id",
+    "status",
+    "assets",
+    "timeline",
+    "mtss",
+    "extensions",
+    "annotation_meta"
+  ],
+  "properties": {
+    "schema_version": {"const": "mtss_3d_v1"},
+    "sample_id": {"type": "string", "minLength": 1},
+    "sequence_id": {"type": ["string", "null"]},
+    "status": {
+      "enum": ["complete", "needs_review", "dry_run_placeholder"]
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_video", "previs_video", "target_video", "audio"],
+      "properties": {
+        "source_video": {"$ref": "#/$defs/fileAsset"},
+        "previs_video": {
+          "allOf": [
+            {"$ref": "#/$defs/fileAsset"},
+            {
+              "type": "object",
+              "required": ["role"],
+              "properties": {
+                "role": {"const": "coarse_3d_previs"}
+              }
+            }
+          ]
+        },
+        "target_video": {"$ref": "#/$defs/fileAsset"},
+        "audio": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/fileAsset"}
+          ]
+        }
+      }
+    },
+    "timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fps",
+        "frame_count",
+        "duration_sec",
+        "time_unit",
+        "interval_convention"
+      ],
+      "properties": {
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "frame_count": {"type": "integer", "minimum": 1},
+        "duration_sec": {"type": "number", "exclusiveMinimum": 0},
+        "time_unit": {"const": "seconds"},
+        "interval_convention": {"const": "[start_sec,end_sec)"}
+      }
+    },
+    "mtss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["references", "shots", "events", "global"],
+      "properties": {
+        "references": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/reference"}
+        },
+        "shots": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/shot"}
+        },
+        "events": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/event"}
+        },
+        "global": {"$ref": "#/$defs/global"}
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mtss_3d"],
+      "properties": {
+        "mtss_3d": {"$ref": "#/$defs/mtss3dExtension"}
+      }
+    },
+    "annotation_meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caption_model",
+        "visual_prompt_version",
+        "audio_prompt_version",
+        "identity_registry_version",
+        "created_at",
+        "request_hashes"
+      ],
+      "properties": {
+        "caption_model": {"type": ["string", "null"]},
+        "visual_prompt_version": {"enum": ["visual_v1", "omni_joint_v1"]},
+        "audio_prompt_version": {"enum": ["audio_v1", "omni_joint_v1"]},
+        "identity_registry_version": {"type": ["string", "null"]},
+        "created_at": {"type": "string", "format": "date-time"},
+        "request_hashes": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "notes": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  },
+  "$defs": {
+    "fileAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "role": {"type": "string"}
+      }
+    },
+    "timeRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_frame",
+        "end_frame_exclusive",
+        "start_sec",
+        "end_sec"
+      ],
+      "properties": {
+        "start_frame": {"type": "integer", "minimum": 0},
+        "end_frame_exclusive": {"type": "integer", "minimum": 1},
+        "start_sec": {"type": "number", "minimum": 0},
+        "end_sec": {"type": "number", "exclusiveMinimum": 0},
+        "temporal_precision": {
+          "enum": ["frame_exact", "asr_exact", "sampled_estimate"]
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "kind", "source_refs", "confidence"],
+      "properties": {
+        "evidence_id": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["observed", "derived", "inferred"]},
+        "source_refs": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref_id",
+        "type",
+        "semantic_description",
+        "timestamp",
+        "appearance_anchor",
+        "evidence_ids"
+      ],
+      "properties": {
+        "ref_id": {"type": "string", "pattern": "^[A-Z]+_[A-Z0-9_]+$"},
+        "type": {"enum": ["person", "object", "animal", "scene"]},
+        "semantic_description": {"type": "string", "minLength": 1},
+        "timestamp": {"type": "number", "minimum": 0},
+        "appearance_anchor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image_refs", "id_features", "attributes"],
+          "properties": {
+            "image_refs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "id_features": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["detail_description"],
+              "properties": {
+                "detail_description": {"type": "string", "minLength": 1}
+              }
+            },
+            "attributes": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["clothing", "hairstyle", "accessories"],
+              "properties": {
+                "clothing": {"type": ["string", "null"]},
+                "hairstyle": {"type": ["string", "null"]},
+                "accessories": {"type": ["string", "null"]}
+              }
+            }
+          }
+        },
+        "evidence_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "shot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shot_id",
+        "time_range",
+        "visual_description",
+        "camera",
+        "references_in_shot",
+        "active_events",
+        "evidence_ids"
+      ],
+      "properties": {
+        "shot_id": {"type": "string", "pattern": "^SHOT_[0-9]+$"},
+        "time_range": {"$ref": "#/$defs/timeRange"},
+        "visual_description": {"type": "string", "minLength": 1},
+        "camera": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shot_type", "angle", "movement"],
+          "properties": {
+            "shot_type": {"type": ["string", "null"]},
+            "angle": {"type": ["string", "null"]},
+            "movement": {"type": ["string", "null"]}
+          }
+        },
+        "references_in_shot": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string"}
+        },
+        "active_events": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string"}
+        },
+        "evidence_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "type", "time_range", "content", "evidence_ids"],
+      "properties": {
+        "event_id": {"type": "string", "pattern": "^EVENT_[0-9]+$"},
+        "type": {"enum": ["dialogue", "sfx", "music"]},
+        "time_range": {"$ref": "#/$defs/timeRange"},
+        "content": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["speaker", "line", "description"],
+          "properties": {
+            "speaker": {"type": ["string", "null"]},
+            "line": {"type": ["string", "null"]},
+            "description": {"type": ["string", "null"]},
+            "speaker_evidence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["visible_on_screen", "mouth_activity", "voice_continuity"],
+              "properties": {
+                "visible_on_screen": {"type": ["boolean", "null"]},
+                "mouth_activity": {"type": ["boolean", "null"]},
+                "voice_continuity": {"type": ["boolean", "null"]}
+              }
+            }
+          }
+        },
+        "evidence_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "global": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scene_description", "global_style", "global_audio", "evidence_ids"],
+      "properties": {
+        "scene_description": {"type": "string", "minLength": 1},
+        "global_style": {"type": "string", "minLength": 1},
+        "global_audio": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["background_music", "ambient_sound"],
+          "properties": {
+            "background_music": {"type": ["string", "null"]},
+            "ambient_sound": {"type": ["string", "null"]}
+          }
+        },
+        "evidence_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "entityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref_id",
+        "canonical_identity",
+        "identity_status",
+        "source_track",
+        "appearance_image",
+        "anchor_origin",
+        "match",
+        "candidate_matches"
+      ],
+      "properties": {
+        "ref_id": {"type": "string"},
+        "canonical_identity": {"type": ["string", "null"]},
+        "identity_status": {"enum": ["matched", "anonymous", "manual"]},
+        "source_track": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sam3_track_id", "first_frame", "last_frame"],
+              "properties": {
+                "sam3_track_id": {"type": "integer", "minimum": 0},
+                "first_frame": {"type": "integer", "minimum": 0},
+                "last_frame": {"type": "integer", "minimum": 0}
+              }
+            }
+          ]
+        },
+        "appearance_image": {"type": "string"},
+        "anchor_origin": {
+          "enum": ["character_gallery", "current_target_shot", "manual"]
+        },
+        "match": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "method",
+                "score",
+                "second_best_score",
+                "margin",
+                "observation_count",
+                "model_version"
+              ],
+              "properties": {
+                "method": {"type": "string"},
+                "score": {"type": "number"},
+                "second_best_score": {"type": ["number", "null"]},
+                "margin": {"type": ["number", "null"]},
+                "observation_count": {"type": "integer", "minimum": 1},
+                "model_version": {"type": "string"}
+              }
+            }
+          ]
+        },
+        "candidate_matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["canonical_identity", "score"],
+            "properties": {
+              "canonical_identity": {"type": "string"},
+              "score": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "blockingMotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "motion_id",
+        "ref_id",
+        "source_track_id",
+        "time_range",
+        "trajectory_ref",
+        "meaning"
+      ],
+      "properties": {
+        "motion_id": {"type": "string"},
+        "ref_id": {"type": "string"},
+        "source_track_id": {"type": "integer", "minimum": 0},
+        "time_range": {"$ref": "#/$defs/timeRange"},
+        "trajectory_ref": {"type": "string"},
+        "meaning": {"type": "string"}
+      }
+    },
+    "geometryFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "sha256"],
+      "properties": {
+        "role": {"type": "string"},
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "mtss3dExtension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_contract",
+        "control_scope",
+        "entity_bindings",
+        "blocking_motion",
+        "geometry",
+        "evidence"
+      ],
+      "properties": {
+        "control_contract": {"const": "previs_control_v1"},
+        "control_scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["preserve", "ignore"],
+          "properties": {
+            "preserve": {"type": "array", "items": {"type": "string"}},
+            "ignore": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "entity_bindings": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/entityBinding"}
+        },
+        "blocking_motion": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/blockingMotion"}
+        },
+        "geometry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "producer", "coordinate_system", "files"],
+          "properties": {
+            "status": {"enum": ["estimated", "ground_truth", "missing"]},
+            "producer": {"type": ["string", "null"]},
+            "coordinate_system": {"type": ["string", "null"]},
+            "files": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/geometryFile"}
+            }
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      }
+    }
+  }
+}

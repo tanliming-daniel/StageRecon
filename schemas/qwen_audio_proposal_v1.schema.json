@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stagerecon.local/schemas/qwen_audio_proposal_v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["events", "global_audio"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "start_sec", "end_sec", "speaker", "line", "description", "confidence"],
+        "properties": {
+          "type": {"enum": ["dialogue", "sfx", "music"]},
+          "start_sec": {"type": "number", "minimum": 0},
+          "end_sec": {"type": "number", "exclusiveMinimum": 0},
+          "speaker": {"type": ["string", "null"]},
+          "line": {"type": ["string", "null"]},
+          "description": {"type": ["string", "null"]},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "global_audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["background_music", "ambient_sound"],
+      "properties": {
+        "background_music": {"type": ["string", "null"]},
+        "ambient_sound": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
