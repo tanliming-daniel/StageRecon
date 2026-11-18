@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from batch_protocol import portable_bundle_is_valid
+from actor_proxy_config import resolve_actor_world_up
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,21 +53,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disk-checkpoint", type=Path, default=DEFAULT_DISK_CHECKPOINT)
     parser.add_argument("--global-index", type=Path, default=DEFAULT_GLOBAL_INDEX)
     parser.add_argument("--da3-model", type=Path, default=DEFAULT_DA3_MODEL)
-    parser.add_argument("--stage1-gpu", default="1")
+    parser.add_argument("--actor-world-up", type=float, nargs=3)
+    parser.add_argument("--anchor-source", choices=("registered-first", "estimated"), default="registered-first")
+    parser.add_argument("--registered-images-dir", type=Path, action="append", default=[])
+    parser.add_argument("--stage1-gpu", default="4")
     parser.add_argument("--stage2-gpu", default="4")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--episode", action="append", default=[])
     parser.add_argument("--include", default="", help="Only paths containing this text")
+    parser.add_argument("--dry-run", action="store_true", help="Print the execution plan without starting model workers.")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--retry-failed", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
 def valid_bundle(directory: Path) -> bool:
-    expected = {
-        "camera_track.json", "actor_tracks.json", "frames.json", "render_job.json"
-    }
-    return directory.is_dir() and {path.name for path in directory.iterdir()} == expected
+    return portable_bundle_is_valid(directory)
 
 
 def clip_output(video: Path, clips_root: Path, output_root: Path) -> Path:
@@ -161,6 +164,7 @@ def read_line(process: subprocess.Popen, label: str) -> dict:
 
 def main() -> None:
     args = parse_args()
+    args.actor_world_up = resolve_actor_world_up(args.environment_dir, args.base_blend, args.actor_world_up, REPO_ROOT / "configs/scenes")
     clips_root = args.clips_root.resolve()
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -200,6 +204,13 @@ def main() -> None:
             {"clip_key": relative, "video": str(video.resolve()), "output_dir": str(output_dir.resolve())}
         )
 
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "selected_clips": len(videos),
+                          "anchor_source": args.anchor_source,
+                          "stage1_gpu": args.stage1_gpu, "stage2_gpu": args.stage2_gpu,
+                          "actor_world_up": args.actor_world_up, "jobs": pending}, indent=2))
+        return
+
     write_manifest(manifest_path, manifest)
     print(
         json.dumps(
@@ -220,6 +231,8 @@ def main() -> None:
         [
             str(args.sam3_python.resolve()), str(STAGE1_WORKER),
             "--environment-dir", str(args.environment_dir.resolve()),
+            "--anchor-source", args.anchor_source,
+            *[item for directory in args.registered_images_dir for item in ("--registered-images-dir", str(directory.resolve()))],
             "--sam3-root", str(args.sam3_root.resolve()),
             "--sam3-checkpoint", str(args.sam3_checkpoint.resolve()),
             "--disk-checkpoint", str(args.disk_checkpoint.resolve()),
@@ -236,6 +249,7 @@ def main() -> None:
             "--da3-model", str(args.da3_model.resolve()),
             "--da3-device", "cuda:0",
             "--base-blend", str(args.base_blend.resolve()),
+            *(["--actor-world-up", *map(str, args.actor_world_up)] if args.actor_world_up is not None else []),
         ],
         args.stage2_gpu,
         cache_root,
@@ -313,6 +327,8 @@ def main() -> None:
                     start_stage2()
                 else:
                     stage2_busy = False
+                    if message["status"] == "ok" and not valid_bundle(Path(message["output_dir"])):
+                        message = {**message, "status": "failed", "error": "Stage2 reported success but output bundle failed validation"}
                     if message["status"] == "ok":
                         completed += 1
                         manifest["clips"][clip_key] = {

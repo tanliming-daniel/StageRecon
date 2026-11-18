@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "base_blend_filename": "scene_with_clip_animation.blend",
+  "alignment_object": "pointcloud",
+  "raw_world_up": [0.0, -0.9961947202682495, -0.0871557667851448],
+  "source": "Inverse rotation of the current Blender alignment object applied to scene +Z; renderer vertical, not an independently recovered floor plane."
+}

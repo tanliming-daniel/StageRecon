@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
             "DA3 body surface along the viewing ray."
         ),
     )
+    parser.add_argument("--proxy-radius", type=float, default=0.18)
+    parser.add_argument(
+        "--world-up", type=float, nargs=3,
+        help="Calibrated COLMAP world up. Otherwise use one fixed clip camera-up prior.",
+    )
     parser.add_argument("--posture-window", type=int, default=15)
     parser.add_argument("--motion-window", type=int, default=5)
     return parser.parse_args()
@@ -115,7 +120,7 @@ def robust_body_core(
         }
     if raw.shape != (image_height, image_width):
         raw = cv2.resize(raw, (image_width, image_height), interpolation=cv2.INTER_NEAREST)
-    binary = (raw >= 128).astype(np.uint8)
+    binary = (raw > (0 if raw.max() <= 1 else 127)).astype(np.uint8)
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if count > 1:
@@ -178,8 +183,11 @@ def robust_body_core(
         & (np.arange(image_width)[None, :] >= axis_x - central_half_width)
         & (np.arange(image_width)[None, :] <= axis_x + central_half_width)
     )
-    central_y = np.where(central)[0]
-    head_y = float(np.percentile(central_y, 2.0)) if len(central_y) else float(ymin)
+    # Quantiles over all mask pixels bias the top down as the visible body
+    # gets longer. Use the top envelope of central columns instead.
+    top_columns = np.flatnonzero(np.any(central, axis=0))
+    tops = [np.flatnonzero(central[:, column])[0] for column in top_columns]
+    head_y = float(np.percentile(tops, 20.0)) if tops else float(ymin)
 
     # DA3 depth comes from the thick central upper-body support. This rejects
     # most hands, arms, and objects extending away from the torso.
@@ -210,7 +218,10 @@ def smooth_localization_bboxes(
     observations: list[dict], window: int, image_size: tuple[int, int]
 ) -> np.ndarray:
     """Filter center and log-size while retaining raw SAM3 boxes as metadata."""
-    bboxes = np.asarray([item["bbox_xyxy"] for item in observations], dtype=np.float64)
+    bboxes = np.asarray(
+        [item.get("mask_component_bbox_xyxy", item["bbox_xyxy"]) for item in observations],
+        dtype=np.float64,
+    )
     centers = np.column_stack(
         (0.5 * (bboxes[:, 0] + bboxes[:, 2]), 0.5 * (bboxes[:, 1] + bboxes[:, 3]))
     )
@@ -247,6 +258,7 @@ def robust_mask_depth(
         return None
     if mask.shape != (image_height, image_width):
         mask = cv2.resize(mask, (image_width, image_height), interpolation=cv2.INTER_NEAREST)
+    mask = (mask > (0 if mask.max() <= 1 else 127)).astype(np.uint8) * 255
     small = cv2.resize(mask, (depth_width, depth_height), interpolation=cv2.INTER_AREA) >= 128
     # Removing one low-resolution boundary pixel suppresses depth bleeding from
     # the background while retaining small and partially visible people.
@@ -328,6 +340,7 @@ def proxy_center_from_body_anchor(
     center_camera: np.ndarray,
     camera: dict,
     proxy_height: float,
+    world_up: np.ndarray | None = None,
 ) -> np.ndarray:
     """Place a fixed proxy from the torso-led head anchor without a foot ray."""
     intrinsic = np.asarray(camera["intrinsics"], dtype=np.float64)
@@ -339,7 +352,7 @@ def proxy_center_from_body_anchor(
     rotation = np.asarray(camera["world_to_camera_rotation"], dtype=np.float64)
     camera_center = np.asarray(camera["camera_center"], dtype=np.float64)
     head_world = camera_center + rotation.T @ head_camera
-    camera_up_world = -rotation.T[:, 1]
+    camera_up_world = -rotation.T[:, 1].copy() if world_up is None else world_up.copy()
     camera_up_world /= max(float(np.linalg.norm(camera_up_world)), 1e-8)
     return head_world - 0.5 * proxy_height * camera_up_world
 
@@ -363,11 +376,65 @@ def world_aabb(center: np.ndarray, axes: np.ndarray, size: np.ndarray) -> tuple[
     return center - extent, center + extent
 
 
+def fixed_proxy_box(center, facing, up, height, radius):
+    """Export the same fixed-size proxy box used by Blender, in raw world units."""
+    up = np.asarray(up, dtype=np.float64).copy()
+    up /= np.linalg.norm(up)
+    forward = np.asarray(facing, dtype=np.float64).copy()
+    forward -= up * np.dot(forward, up)
+    if np.linalg.norm(forward) < 1e-8:
+        forward = np.array([1., 0., 0.]) if abs(up[0]) < .9 else np.array([0., 1., 0.])
+        forward -= up * np.dot(forward, up)
+    forward /= np.linalg.norm(forward)
+    side = np.cross(up, forward)
+    axes = np.column_stack([forward, side, up])
+    size = np.array([2 * radius, 2 * radius, height], dtype=np.float64)
+    center = np.asarray(center, dtype=np.float64)
+    minimum, maximum = world_aabb(center, axes, size)
+    return {"type": "fixed_actor_proxy_box", "center_world": center.tolist(),
+            "size_world": size.tolist(), "axes_world": axes.tolist(),
+            "aabb_min_world": minimum.tolist(), "aabb_max_world": maximum.tolist()}
+
+
+def proxy_support_quality(output_frames, proxy_height, image_size):
+    """Flag tiny interior detections for review without deleting their tracks.
+
+    A scene-photo detection should not become a full-height actor. Requiring
+    both tiny image support and implausible physical extent protects large
+    close-up heads and small-but-distant full bodies. The decision is fixed
+    for the complete track, never animated frame by frame.
+    """
+    width, height = image_size
+    heights = [f["bbox_3d"]["size_world"][1] for f in output_frames]
+    areas = [(f["bbox_xyxy"][2]-f["bbox_xyxy"][0]+1)*(f["bbox_xyxy"][3]-f["bbox_xyxy"][1]+1)/(width*height)
+             for f in output_frames]
+    height_ratio = float(np.median(heights) / proxy_height)
+    area_fraction = float(np.median(areas))
+    boundary_fraction = float(np.mean([f.get("touches_image_boundary", False) for f in output_frames]))
+    insufficient = height_ratio < .15 and area_fraction < .003 and boundary_fraction < .25
+    return {"eligible": not insufficient, "review_required": insufficient,
+            "reason": "tiny_interior_mask_with_insufficient_physical_extent" if insufficient else None,
+            "median_visible_height_ratio": height_ratio, "median_bbox_area_fraction": area_fraction,
+            "boundary_observation_fraction": boundary_fraction, "decision_scope": "entire_track"}
+
+
 def main() -> None:
     args = parse_args()
     people = json.loads(args.person_tracks.resolve().read_text())
     camera_data = json.loads(args.camera_track.resolve().read_text())
+    if args.proxy_height <= 0 or args.proxy_radius <= 0:
+        raise ValueError("Proxy height and radius must be positive")
     camera_frames = {int(item["frame_index"]): item for item in camera_data["frames"]}
+    depth_indices = {int(item["frame_index"]): i for i, item in enumerate(camera_data["frames"])}
+    if len(camera_frames) != len(camera_data["frames"]):
+        raise ValueError("Camera frame indices must be unique")
+    up_prior = (
+        np.asarray(args.world_up, dtype=np.float64) if args.world_up is not None else
+        np.median([-np.asarray(c["world_to_camera_rotation"])[1] for c in camera_frames.values()], axis=0)
+    )
+    if not np.all(np.isfinite(up_prior)) or np.linalg.norm(up_prior) < 1e-8:
+        raise ValueError("World up must be a finite nonzero vector")
+    up_prior /= np.linalg.norm(up_prior)
     image_width = int(camera_data["resolution"]["width"])
     image_height = int(camera_data["resolution"]["height"])
 
@@ -385,6 +452,8 @@ def main() -> None:
             f"{len(camera_data['frames'])}"
         )
     depth_scale = float(camera_data["da3"]["translation_scale"])
+    if not np.isfinite(depth_scale) or depth_scale <= 0:
+        raise ValueError("Depth-to-world scale must be positive and finite")
 
     actor_tracks = []
     for track in people.get("tracks", []):
@@ -392,13 +461,19 @@ def main() -> None:
         for record in sorted(track["frames"], key=lambda item: item["frame_index"]):
             frame_index = int(record["frame_index"])
             camera = camera_frames.get(frame_index)
-            if camera is None or frame_index >= len(depths):
+            if camera is None:
                 continue
+            record = dict(record)
+            mask_path = Path(record["mask"])
+            if not mask_path.is_absolute():
+                mask_path = args.person_tracks.resolve().parent / mask_path
+            record["mask"] = str(mask_path)
+            depth_index = depth_indices[frame_index]
             body_core = robust_body_core(record, (image_width, image_height))
             stats = robust_mask_depth(
                 record,
-                depths[frame_index],
-                None if confidence is None else confidence[frame_index],
+                depths[depth_index],
+                None if confidence is None else confidence[depth_index],
                 (image_width, image_height),
                 sampling_mask=body_core["depth_mask"],
             )
@@ -470,20 +545,9 @@ def main() -> None:
             np.stack([item["body_anchor_xy_raw"] for item in observations]),
             args.bbox_window,
         )
-        # Preserve the temporally filtered visible extent for 3D-box metadata,
-        # but centre it on the torso axis and use the robust central head/top.
-        widths_2d = localization_bboxes[:, 2] - localization_bboxes[:, 0]
-        heights_2d = localization_bboxes[:, 3] - localization_bboxes[:, 1]
-        localization_bboxes[:, 0] = body_anchors[:, 0] - 0.5 * widths_2d
-        localization_bboxes[:, 2] = body_anchors[:, 0] + 0.5 * widths_2d
-        localization_bboxes[:, 1] = body_anchors[:, 1]
-        localization_bboxes[:, 3] = body_anchors[:, 1] + heights_2d
-        localization_bboxes[:, [0, 2]] = np.clip(
-            localization_bboxes[:, [0, 2]], 0.0, image_width - 1.0
-        )
-        localization_bboxes[:, [1, 3]] = np.clip(
-            localization_bboxes[:, [1, 3]], 0.0, image_height - 1.0
-        )
+        # Bbox extent and torso/head anchor serve different purposes. Recentring
+        # the box on the torso shifts it away from its observed silhouette,
+        # especially at image boundaries. Keep the measured component extent.
 
         # Rebuild every box from robustly filtered 2D center/extent and depth.
         # Raw SAM3 boxes remain in the output for diagnosis.  This prevents a
@@ -516,6 +580,7 @@ def main() -> None:
                 center_camera,
                 camera,
                 args.proxy_height,
+                up_prior,
             )
             item["axes_world"] = axes_world
             item["localization_bbox_xyxy"] = localization_bbox
@@ -549,7 +614,7 @@ def main() -> None:
             lo = max(0, index - args.motion_window)
             hi = min(len(centers) - 1, index + args.motion_window)
             velocity = proxy_centers[hi] - proxy_centers[lo]
-            up = -axes[:, 1]
+            up = up_prior
             velocity -= up * float(np.dot(velocity, up))
             motion = float(np.linalg.norm(velocity))
             if motion > 0.03 * median_height:
@@ -600,6 +665,10 @@ def main() -> None:
                         "with_surface_depth_offset"
                     ),
                     "proxy_center_world": proxy_centers[index].tolist(),
+                    "head_anchor_world": (proxy_centers[index] + 0.5 * args.proxy_height * up_prior).tolist(),
+                    "proxy_up_world": up_prior.tolist(),
+                    "proxy_bbox_3d": fixed_proxy_box(proxy_centers[index], facing, up_prior,
+                                                     args.proxy_height, args.proxy_radius),
                     "bbox_3d": {
                         "type": "camera_oriented_box",
                         "center_world": center.tolist(),
@@ -634,6 +703,7 @@ def main() -> None:
                 "first_frame": output_frames[0]["frame_index"],
                 "last_frame": output_frames[-1]["frame_index"],
                 "frame_count": len(output_frames),
+                "proxy_quality": proxy_support_quality(output_frames, args.proxy_height, (image_width, image_height)),
                 "frames": output_frames,
             }
         )
@@ -650,14 +720,24 @@ def main() -> None:
         "box_convention": {
             "axes_world_columns": ["camera_right", "camera_down", "camera_forward"],
             "size_world_order": ["width", "height", "depth"],
-            "extent": "visible SAM3 2D bbox at robust DA3 foreground depth",
+            "extent": "visible connected-component bbox at robust DA3 foreground depth",
+        },
+        "proxy_box_convention": {
+            "axes_world_columns": ["actor_forward", "actor_side", "scene_up"],
+            "size_world_order": ["forward_extent", "side_extent", "height"],
+            "size_policy": "fixed_for_entire_clip",
+            "extent": "coarse head-and-cylinder proxy; not fitted anatomical extent",
         },
         "proxy_convention": {
             "height_world": args.proxy_height,
+            "radius_world": args.proxy_radius,
+            "up_world": up_prior.tolist(),
+            "up_source": "explicit_world_up" if args.world_up is not None else "fixed_clip_camera_up_prior",
+            "size_policy": "fixed_for_entire_clip",
             "surface_to_center_offset_world": args.surface_to_center_offset,
             "position": (
                 "smoothed_torso_axis_head_ray_at_surface_plus_depth_offset_"
-                "minus_half_height_along_camera_up"
+                "minus_half_height_along_fixed_clip_up"
             ),
             "uses_foot_pixel": False,
             "uses_floor_intersection": False,

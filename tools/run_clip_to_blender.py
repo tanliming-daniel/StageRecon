@@ -24,6 +24,8 @@ import cv2
 import numpy as np
 
 from clip_render_job import write_render_job
+from pose_quality import assess_pose_quality
+from actor_proxy_config import resolve_actor_world_up
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +72,8 @@ def parse_args() -> argparse.Namespace:
         default=0.36,
         help="World-space offset from visible person surface to proxy centre.",
     )
+    parser.add_argument("--actor-world-up", type=float, nargs=3)
+    parser.add_argument("--allow-review-anchors", action="store_true", help="Explicitly allow review-quality camera endpoints.")
     parser.add_argument("--focal-pixels", default="")
     parser.add_argument("--anchor-top-k", type=int, default=20)
     parser.add_argument("--anchor-ratio", type=float, default=0.90)
@@ -173,12 +177,7 @@ def anchor_quality(localization_path: Path, frame_index: int) -> dict:
     pnp = pose["pnp"]
     inliers = int(pnp["inlier_count"])
     rmse = float(pnp["inlier_rmse_pixels"])
-    if inliers >= 40 and rmse <= 4.5:
-        status = "accepted"
-    elif inliers >= 20 and rmse <= 5.0:
-        status = "review"
-    else:
-        status = "rejected"
+    status = assess_pose_quality(pose)["status"]
     return {
         "frame_index": frame_index,
         "status": status,
@@ -314,6 +313,7 @@ def diagnostic_video(
 
 def main() -> None:
     args = parse_args()
+    args.actor_world_up = resolve_actor_world_up(args.environment_dir, args.blender_input, args.actor_world_up, REPO_ROOT / "configs/scenes")
     if args.no_blender and args.preview:
         raise ValueError("--preview cannot be combined with --no-blender")
     started = time.perf_counter()
@@ -401,7 +401,9 @@ def main() -> None:
     first_mask = masks_dir / "union/000000.png"
     anchor_dir = output_dir / "anchor"
     anchor_pose = anchor_dir / "localization_colmap.json"
-    if not (args.resume and anchor_pose.is_file()):
+    localization_sources = [SINGLE_IMAGE_RUNNER, REPO_ROOT / "tools/localize_query_from_disk.py",
+                            REPO_ROOT / "tools/pnp_focal.py", REPO_ROOT / "tools/pose_quality.py"]
+    if not (args.resume and up_to_date(anchor_pose, first_frame, first_mask, *localization_sources)):
         command = [
             str(args.python_executable), str(SINGLE_IMAGE_RUNNER),
             "--query-image", str(first_frame),
@@ -427,7 +429,7 @@ def main() -> None:
     tail_anchor_dir = output_dir / "tail_anchor"
     tail_anchor_pose = tail_anchor_dir / "localization_colmap.json"
     if args.camera_tracker == "da3" and not (
-        args.resume and tail_anchor_pose.is_file()
+        args.resume and up_to_date(tail_anchor_pose, last_frame, last_mask, *localization_sources)
     ):
         command = [
             str(args.python_executable), str(SINGLE_IMAGE_RUNNER),
@@ -449,7 +451,8 @@ def main() -> None:
         measure("last_frame_absolute_pnp", durations, lambda: run(command))
 
     first_anchor_quality = anchor_quality(anchor_pose, 0)
-    if first_anchor_quality["status"] == "rejected":
+    allowed_anchor_statuses = ("accepted", "review") if args.allow_review_anchors else ("accepted",)
+    if first_anchor_quality["status"] not in allowed_anchor_statuses:
         raise RuntimeError(
             "First-frame PnP failed the pose-quality gate: "
             f"{first_anchor_quality}"
@@ -457,7 +460,7 @@ def main() -> None:
     tail_quality = None
     if args.camera_tracker == "da3":
         tail_quality = anchor_quality(tail_anchor_pose, last_frame_index)
-        if tail_quality["status"] == "rejected":
+        if tail_quality["status"] not in allowed_anchor_statuses:
             raise RuntimeError(
                 "Last-frame PnP failed the pose-quality gate: "
                 f"{tail_quality}"
@@ -496,6 +499,8 @@ def main() -> None:
                 "--smooth-polyorder", str(args.da3_smooth_polyorder),
                 "--output", str(camera_track),
             ]
+            if args.allow_review_anchors:
+                camera_command.append("--allow-review-anchors")
             raw_prediction = output_dir / "da3_prediction.npz"
             if args.resume and raw_prediction.is_file():
                 camera_command.extend(("--raw-prediction", str(raw_prediction)))
@@ -533,6 +538,8 @@ def main() -> None:
         else:
             actor_command.extend(("--environment-dir", str(environment)))
         actor_command.extend(("--output", str(actor_tracks)))
+        if args.camera_tracker == "da3" and args.actor_world_up is not None:
+            actor_command.extend(("--world-up", *map(str, args.actor_world_up)))
         if args.camera_tracker == "da3":
             actor_command.extend(
                 ("--surface-to-center-offset", str(args.actor_depth_offset))

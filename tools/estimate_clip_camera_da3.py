@@ -30,10 +30,13 @@ from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation
 
 from depth_anything_3.api import DepthAnything3
+from pose_quality import require_usable_anchor
+from registered_anchors import intrinsics_between_anchors
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--allow-review-anchors", action="store_true")
     parser.add_argument("--frames-dir", type=Path, required=True)
     parser.add_argument("--mask-dir", type=Path)
     parser.add_argument("--anchor-localization", type=Path, required=True)
@@ -373,6 +376,10 @@ def main() -> None:
     tail_anchor_path = require_file(
         args.tail_anchor_localization, "Tail anchor localization"
     )
+    anchor = json.loads(anchor_path.read_text())
+    tail_anchor = json.loads(tail_anchor_path.read_text())
+    require_usable_anchor(anchor, allow_review=args.allow_review_anchors)
+    require_usable_anchor(tail_anchor, allow_review=args.allow_review_anchors)
     model_path = args.model.resolve()
     if not (model_path / "model.safetensors").is_file():
         raise FileNotFoundError(f"DA3 model.safetensors not found in {model_path}")
@@ -437,8 +444,6 @@ def main() -> None:
         args.smooth_polyorder,
     )
 
-    anchor = json.loads(anchor_path.read_text())
-    tail_anchor = json.loads(tail_anchor_path.read_text())
     anchor_rotation = np.asarray(anchor["world_to_camera_rotation"], dtype=np.float64)
     anchor_translation = np.asarray(anchor["world_to_camera_translation"], dtype=np.float64)
     anchor_center = -anchor_rotation.T @ anchor_translation
@@ -506,19 +511,21 @@ def main() -> None:
         translation = absolute_w2c[:3, 3]
         center = frame_c2w[:3, 3]
         focal = float(absolute_focals[index])
-        intrinsic = np.array(
-            [[focal, 0.0, original_width / 2], [0.0, focal, original_height / 2], [0.0, 0.0, 1.0]],
-            dtype=np.float64,
+        intrinsic = intrinsics_between_anchors(
+            anchor["pnp"]["intrinsics"], tail_anchor["pnp"]["intrinsics"],
+            focal, index / max(len(frame_paths) - 1, 1),
         )
         if index == 0:
             quality = {
                 "status": "anchor",
+                "pose_source": anchor.get("pose_source", "estimated_disk_pnp"),
                 "pnp_inlier_count": int(anchor["pnp"]["inlier_count"]),
                 "pnp_rmse_pixels": float(anchor["pnp"]["inlier_rmse_pixels"]),
             }
         elif index == len(frame_paths) - 1:
             quality = {
                 "status": "tail_anchor",
+                "pose_source": tail_anchor.get("pose_source", "estimated_disk_pnp"),
                 "pnp_inlier_count": int(tail_anchor["pnp"]["inlier_count"]),
                 "pnp_rmse_pixels": float(tail_anchor["pnp"]["inlier_rmse_pixels"]),
             }
@@ -561,6 +568,12 @@ def main() -> None:
         "tail_anchor_frame_name": frame_paths[-1].name,
         "tail_anchor_localization": str(tail_anchor_path),
         "absolute_localization_frames": [0, len(frame_paths) - 1],
+        "absolute_anchor_policy": anchor.get("requested_anchor_source", "estimated"),
+        "absolute_anchor_provenance": [
+            {"frame_index": i, "pose_source": p.get("pose_source", "estimated_disk_pnp"),
+             "registration": p.get("registration"), "quality": p.get("quality")}
+            for i, p in ((0, anchor), (len(frame_paths) - 1, tail_anchor))
+        ],
         "resolution": {"width": original_width, "height": original_height},
         "camera_center": frames[0]["camera_center"],
         "da3": {

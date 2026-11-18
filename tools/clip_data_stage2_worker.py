@@ -10,6 +10,7 @@ import shutil
 import sys
 import time
 import traceback
+from batch_protocol import stage_result
 from pathlib import Path
 
 
@@ -76,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--da3-smooth-sigma", type=float, default=0.35)
     parser.add_argument("--da3-smooth-window", type=int, default=21)
     parser.add_argument("--da3-smooth-polyorder", type=int, default=3)
+    parser.add_argument("--actor-world-up", type=float, nargs=3)
     parser.add_argument("--actor-depth-offset", type=float, default=0.36)
     parser.add_argument("--base-blend", type=Path, required=True)
     parser.add_argument("--camera-name", default="PredictedClipCamera")
@@ -131,6 +133,7 @@ def main() -> None:
                         "--depth-prediction", str(raw_prediction),
                         "--output", str(actor_path),
                         "--surface-to-center-offset", str(args.actor_depth_offset),
+                        *(["--world-up", *map(str, args.actor_world_up)] if args.actor_world_up is not None else []),
                     ],
                 )
                 sanitize_portable_bundle(output_dir)
@@ -161,28 +164,18 @@ def main() -> None:
                     raise RuntimeError(f"Portable bundle has unexpected files: {sorted(actual)}")
                 camera = json.loads(camera_path.read_text())
                 actors = json.loads(actor_path.read_text())
-                emit(
-                    {
-                        "type": "stage2_result",
-                        "status": "ok",
-                        **job,
-                        "frame_count": len(camera.get("frames", [])),
-                        "actor_track_count": len(actors.get("tracks", [])),
-                        "stage2_seconds": round(time.perf_counter() - started, 3),
-                    }
-                )
+                emit(stage_result(job, stage=2, status="ok",
+                        frame_count=len(camera.get("frames", [])),
+                        actor_track_count=len(actors.get("tracks", [])),
+                        stage2_seconds=round(time.perf_counter() - started, 3),
+                ))
             except Exception as error:
                 shutil.rmtree(output_dir, ignore_errors=True)
-                emit(
-                    {
-                        "type": "stage2_result",
-                        "status": "failed",
-                        **job,
-                        "error": f"{type(error).__name__}: {error}",
-                        "traceback": traceback.format_exc(),
-                        "stage2_seconds": round(time.perf_counter() - started, 3),
-                    }
-                )
+                emit(stage_result(job, stage=2, status="failed",
+                        error=f"{type(error).__name__}: {error}",
+                        traceback=traceback.format_exc(),
+                        stage2_seconds=round(time.perf_counter() - started, 3),
+                ))
     finally:
         estimate_clip_camera_da3.DepthAnything3.from_pretrained = original_loader
 

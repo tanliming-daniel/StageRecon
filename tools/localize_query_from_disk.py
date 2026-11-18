@@ -28,6 +28,7 @@ if str(SITCOMS3D_ROOT) not in sys.path:
     sys.path.insert(0, str(SITCOMS3D_ROOT))
 
 from sitcoms3D.utils.colmap_utils import read_model  # noqa: E402
+from pnp_focal import pnp_with_focal_search  # noqa: E402
 
 
 DEFAULT_ENVIRONMENT = (
@@ -137,51 +138,6 @@ def verify_pair_geometry(
     keep = inlier_mask.reshape(-1).astype(bool)
     return query_ids[keep], reference_ids[keep]
 
-
-def pnp_with_focal_search(
-    xyz: np.ndarray,
-    xy: np.ndarray,
-    image_size: tuple[int, int],
-    focal_values: list[float],
-    reprojection_error: float,
-) -> tuple[dict, np.ndarray]:
-    width, height = image_size
-    best: tuple[tuple[int, float], dict, np.ndarray] | None = None
-    for focal in focal_values:
-        focal = float(focal)
-        intrinsic = np.array([[focal, 0.0, width / 2], [0.0, focal, height / 2], [0.0, 0.0, 1.0]])
-        ok, rotation, translation, inliers = cv2.solvePnPRansac(
-            xyz,
-            xy,
-            intrinsic,
-            None,
-            iterationsCount=5000,
-            reprojectionError=reprojection_error,
-            confidence=0.999,
-            flags=cv2.SOLVEPNP_EPNP,
-        )
-        if not ok or inliers is None or len(inliers) < 6:
-            continue
-        inlier_ids = inliers.reshape(-1)
-        rotation, translation = cv2.solvePnPRefineLM(
-            xyz[inlier_ids], xy[inlier_ids], intrinsic, None, rotation, translation
-        )
-        projected, _ = cv2.projectPoints(xyz[inlier_ids], rotation, translation, intrinsic, None)
-        rmse = float(np.sqrt(np.mean(np.sum((projected.reshape(-1, 2) - xy[inlier_ids]) ** 2, axis=1))))
-        key = (int(len(inlier_ids)), -rmse)
-        result = {
-            "focal": float(focal),
-            "intrinsics": intrinsic.tolist(),
-            "rotation_vector": rotation.reshape(-1).tolist(),
-            "translation": translation.reshape(-1).tolist(),
-            "inlier_count": int(len(inlier_ids)),
-            "inlier_rmse_pixels": rmse,
-        }
-        if best is None or key > best[0]:
-            best = (key, result, inlier_ids)
-    if best is None:
-        raise RuntimeError("PnP failed for every focal-length candidate")
-    return best[1], best[2]
 
 
 def main() -> None:
@@ -325,7 +281,7 @@ def main() -> None:
         focal_values = [
             float(item) * max(image_size) for item in args.focal_multipliers.split(",") if item.strip()
         ]
-    pnp, inlier_ids = pnp_with_focal_search(xyz, xy, image_size, focal_values, args.reprojection_error)
+    pnp, inlier_ids = pnp_with_focal_search(xyz, xy, image_size, focal_values, args.reprojection_error, adaptive=not bool(args.focal_pixels.strip()))
     rotation, _ = cv2.Rodrigues(np.asarray(pnp["rotation_vector"], dtype=np.float64))
     translation = np.asarray(pnp["translation"], dtype=np.float64)
     center = -rotation.T @ translation

@@ -52,9 +52,12 @@ def actor_proxy_settings(actor_tracks: dict) -> dict:
         else "bbox_3d.center_world"
     )
     return {
-        "type": "fixed_cylinder",
-        "radius": 0.18,
-        "height": 1.70,
+        "type": "fixed_head_cylinder",
+        "facing_marker": "cream_horizontal_spherical_band",
+        "radius": float(actor_tracks.get("proxy_convention", {}).get("radius_world", 0.18)),
+        "height": float(actor_tracks.get("proxy_convention", {}).get("height_world", 1.70)),
+        "size_policy": "fixed_for_entire_clip",
+        "anchor": "head_top_world",
         "position_source": position_source,
         "uses_bbox_size": False,
         "uses_posture_scale": False,
