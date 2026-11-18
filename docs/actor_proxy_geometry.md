@@ -65,3 +65,23 @@ rendering them exercises the importer fix but cannot rerun the mask estimator.
 Tiny interior tracks can carry a track-level `proxy_quality` review flag. The
 raw track is retained, but Blender omits an ineligible proxy for the complete
 clip. See `production_registered_anchors.md` for criteria and validation.
+
+## Multi-HMR for half-body shots and close-ups
+
+Pass `--multihmr-checkpoint` and `--multihmr-source` to `tools/run_clip_to_blender.py` to enable the optional pose stage with the DA3 camera tracker. Use `--multihmr-python` for the Python environment containing PyTorch, SciPy, OpenCV and the official Multi-HMR dependencies. The source checkout needs the official SMPL-X assets. An offline DINOv2 checkout can be passed with `--dinov2-source`. The calibrated RGB inference path was exercised with the original 672_B checkpoint.
+
+For an existing shot, run the refinement stage directly:
+
+```sh
+python tools/refine_actor_pose.py \
+  --actor-tracks "$BUNDLE/actor_tracks.json" --camera-track "$BUNDLE/camera_track.json" \
+  --person-tracks "$RUN/masks/person_tracks.json" --frames-dir "$RUN/frames" \
+  --multihmr-source "$MULTIHMR" --checkpoint "$CHECKPOINT" \
+  --output "$BUNDLE/actor_tracks_multihmr.json"
+```
+
+Give the resulting actor JSON to the usual Blender clip importer. The single-clip runner puts it in the portable render job automatically. SAM3 IDs and DA3 positions remain the reference. Projected joints associate whole-image detections with instance masks one-to-one. For unmatched IDs, the same model gets a padded RGB crop with subdued background and adjusted camera intrinsics.
+
+Each actor sample records separate head and body sources in `proxy_orientation`. The head basis uses the SMPL-X chest, neck and head rotation chain. A torso update requires the chest and both projected shoulders inside the same mask with plausible separation below the head. This is a visibility heuristic. In a face-only view, the importer uses the latest supported torso orientation from this ID in the shot, or the original actor direction if none has been observed. When the head itself is missing, its orientation is held for up to three frames. The resulting band represents head direction; gaze and pixel-accurate eyes require separate evidence.
+
+The Blender head-cylinder style animates independent head and torso meshes. The fitted head uses the visible upper-mask width, and the original DA3 depth anchors its position. Reliable shoulder observations determine torso orientation. When shape fitting has no usable sample for an entire actor, the proxy uses default dimensions.

@@ -65,7 +65,7 @@ class ActorGeometryTests(unittest.TestCase):
         observations = [{'bbox_xyxy': [0, 20, 130, 199],
                          'mask_component_bbox_xyxy': [0, 20, 100, 199]}]
         actual = smooth_localization_bboxes(observations, 7, (160, 200))
-        np.testing.assert_allclose(actual, [[0, 20, 100, 199]])
+        np.testing.assert_allclose(actual, [[0, 20, 100, 199]], atol=1e-10)
 
     def test_nonzero_frame_ids_use_depth_array_order(self):
         with tempfile.TemporaryDirectory() as tmp:

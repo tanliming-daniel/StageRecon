@@ -72,6 +72,10 @@ def parse_args() -> argparse.Namespace:
         default=0.36,
         help="World-space offset from visible person surface to proxy centre.",
     )
+    parser.add_argument("--multihmr-checkpoint", type=Path, help="Enable visibility-aware head and torso fitting")
+    parser.add_argument("--multihmr-source", type=Path)
+    parser.add_argument("--multihmr-python", type=Path, default=Path(sys.executable))
+    parser.add_argument("--dinov2-source", type=Path, help="Optional offline DINOv2 checkout")
     parser.add_argument("--actor-world-up", type=float, nargs=3)
     parser.add_argument("--allow-review-anchors", action="store_true", help="Explicitly allow review-quality camera endpoints.")
     parser.add_argument("--focal-pixels", default="")
@@ -314,6 +318,8 @@ def diagnostic_video(
 def main() -> None:
     args = parse_args()
     args.actor_world_up = resolve_actor_world_up(args.environment_dir, args.blender_input, args.actor_world_up, REPO_ROOT / "configs/scenes")
+    if args.multihmr_checkpoint and (args.camera_tracker != "da3" or not args.multihmr_source):
+        raise ValueError("--multihmr-checkpoint requires --multihmr-source and the DA3 camera tracker")
     if args.no_blender and args.preview:
         raise ValueError("--preview cannot be combined with --no-blender")
     started = time.perf_counter()
@@ -550,6 +556,22 @@ def main() -> None:
             lambda: run(actor_command),
         )
 
+    suffix = ""
+    if args.multihmr_checkpoint:
+        suffix = "_multihmr"
+        refined = output_dir / "actor_tracks_multihmr.json"
+        command = [
+            str(args.multihmr_python), str(REPO_ROOT / "tools/refine_actor_pose.py"),
+            "--frames-dir", str(frames_dir), "--person-tracks", str(person_tracks),
+            "--camera-track", str(camera_track), "--actor-tracks", str(actor_tracks),
+            "--multihmr-source", str(args.multihmr_source), "--checkpoint", str(args.multihmr_checkpoint),
+            "--output", str(refined),
+        ]
+        if args.dinov2_source:
+            command.extend(["--dinov2-source", str(args.dinov2_source)])
+        measure("visibility_aware_pose", durations, lambda: run(command))
+        actor_tracks = refined
+
     render_job_path = output_dir / "render_job.json"
     render_job = write_render_job(
         output=render_job_path,
@@ -561,7 +583,7 @@ def main() -> None:
         hide_collections=("actor1", "camera"),
     )
 
-    diagnostic_path = output_dir / "diagnostic_overlay.mp4"
+    diagnostic_path = output_dir / f"diagnostic_overlay{suffix}.mp4"
     if not (
         args.resume
         and up_to_date(diagnostic_path, person_tracks, actor_tracks, camera_track)
@@ -579,8 +601,8 @@ def main() -> None:
             ),
         )
 
-    blender_output = output_dir / "scene_with_clip_animation.blend"
-    blender_metadata = output_dir / "blender_animation.json"
+    blender_output = output_dir / f"scene_with_clip_animation{suffix}.blend"
+    blender_metadata = output_dir / f"blender_animation{suffix}.json"
     if not args.no_blender and not (
         args.resume
         and up_to_date(
@@ -609,7 +631,7 @@ def main() -> None:
             lambda: run(command, environment=blender_environment()),
         )
 
-    preview_path = output_dir / "predicted_camera_preview.png"
+    preview_path = output_dir / f"predicted_camera_preview{suffix}.png"
     preview_metadata = output_dir / "viewport_capture.json"
     if args.preview and not (
         args.resume and up_to_date(preview_path, blender_output)

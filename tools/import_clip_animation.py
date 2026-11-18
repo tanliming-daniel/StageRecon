@@ -223,6 +223,10 @@ def main() -> None:
         floor_y = world_direction(floor["basis_y"], alignment)
         floor_normal = world_direction(floor["normal"], alignment)
     convention = actor_tracks.get("proxy_convention", {})
+    fitted = actor_tracks.get("pose_estimator") == "sam3_multihmr_visibility_v1" and args.actor_proxy_style == "head-cylinder"
+    if fitted:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from animate_fitted_proxy import animate_proxy
     proxy_names = []
     skipped_proxy_tracks = []
     for track in actor_tracks.get("tracks", []):
@@ -318,6 +322,11 @@ def main() -> None:
             arrow.rotation_euler[1] = math.pi / 2.0
             arrow.data.materials.append(actor_material(track_id))
 
+        if fitted and bbox_representation:
+            animate_proxy(root, track, cameras_by_frame, convention, alignment, body, head, marker, proxy_radius, proxy_height, head_radius)
+            proxy_names.append(root_name)
+            continue
+
         first_frame = int(track["first_frame"]) + 1
         last_frame = int(track["last_frame"]) + 1
         if first_frame > 1:
@@ -367,7 +376,7 @@ def main() -> None:
                           for bag in strip.channelbags for curve in bag.fcurves]
             for curve in curves:
                 for key in curve.keyframe_points:
-                    key.interpolation = "LINEAR" if curve.data_path != "scale" else "CONSTANT"
+                    key.interpolation = "CONSTANT" if curve.data_path in {"scale", "hide_render", "hide_viewport"} else "LINEAR"
     scene.render.resolution_x = width
     scene.render.resolution_y = height
     scene.render.resolution_percentage = 100
@@ -384,7 +393,7 @@ def main() -> None:
         "camera": camera.name,
         "actor_proxies": proxy_names,
         "skipped_proxy_tracks": skipped_proxy_tracks,
-        "actor_proxy_geometry": (
+        "actor_proxy_geometry": {"type": "fitted_head_torso", "orientation": "visibility_aware"} if fitted else (
             {
                 "type": "fixed_head_cylinder" if args.actor_proxy_style == "head-cylinder" else "fixed_cylinder",
                 "radius": float(convention.get("radius_world", 0.18)),

@@ -33,6 +33,8 @@ def relative_file(path: Path, job_dir: Path) -> str:
 
 
 def actor_proxy_settings(actor_tracks: dict) -> dict:
+    if actor_tracks.get("pose_estimator") == "sam3_multihmr_visibility_v1":
+        return {"type": "fitted_head_torso", "orientation": "visibility_aware"}
     if "3d_bbox" not in str(actor_tracks.get("representation", "")):
         return {
             "type": "legacy_floor_cylinder_with_facing_arrow",
