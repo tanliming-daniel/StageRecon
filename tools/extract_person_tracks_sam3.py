@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--version", choices=("sam3", "sam3.1"), default="sam3")
     parser.add_argument("--prompt", default="person")
-    parser.add_argument("--prob-threshold", type=float, default=0.45)
+    parser.add_argument("--prob-threshold", type=float, default=0.75)
     parser.add_argument("--dilate-pixels", type=int, default=12)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
@@ -116,7 +116,7 @@ def main() -> None:
             "session_id": session_id,
             "frame_index": 0,
             "text": args.prompt,
-            "output_prob_thresh": args.prob_threshold,
+            "output_prob_thresh": max(0., float(np.nextafter(np.float32(args.prob_threshold), np.float32(0)))),
         }
     )
 
@@ -133,7 +133,7 @@ def main() -> None:
                 "type": "propagate_in_video",
                 "session_id": session_id,
                 "propagation_direction": "forward",
-                "output_prob_thresh": args.prob_threshold,
+                "output_prob_thresh": max(0., float(np.nextafter(np.float32(args.prob_threshold), np.float32(0)))),
                 "evict_cached_frame_outputs": True,
             }
         )
@@ -153,6 +153,11 @@ def main() -> None:
                 object_ids = np.asarray(object_ids).reshape(-1)
                 masks = np.asarray(masks)
                 for instance_index, object_id_value in enumerate(object_ids):
+                    score = scalar_at(scores, instance_index)
+                    if score is None or not np.isfinite(score):
+                        raise ValueError("Missing SAM 3 instance score")
+                    if score < args.prob_threshold:
+                        continue
                     mask = masks[instance_index]
                     while mask.ndim > 2:
                         mask = mask[0]
@@ -180,7 +185,7 @@ def main() -> None:
                             "bbox_xyxy": [x1, y1, x2, y2],
                             "centroid_xy": [float(xs.mean()), float(ys.mean())],
                             "area_pixels": int(mask.sum()),
-                            "score": scalar_at(scores, instance_index),
+                            "score": score,
                         }
                     )
             if kernel is not None:

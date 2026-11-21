@@ -1,0 +1,273 @@
+{
+  "seats": {
+    "sofa": {
+      "object": "geometry_0.002",
+      "left": [
+        1.3749442100524902,
+        2.2651093006134033,
+        -0.09400014579296112
+      ],
+      "right": [
+        1.7782962322235107,
+        3.6200363636016846,
+        -0.09907712042331696
+      ],
+      "front_direction": [
+        0.2681560516357422,
+        -0.07982802391052246
+      ],
+      "height": -0.097
+    },
+    "chair": {
+      "object": "geometry_0.005",
+      "left": [
+        2.9097150959790934,
+        4.194047190075923,
+        -0.07267530000093518
+      ],
+      "right": [
+        3.133657129892605,
+        4.092746846451344,
+        -0.0726719442726494
+      ],
+      "front_direction": [
+        -0.10352232631618122,
+        -0.22885414044102512
+      ],
+      "height": -0.07221160771614375
+    },
+    "geometry_0_0": {
+      "object": "geometry_0",
+      "left": [
+        -1.4910310009251293,
+        3.2824493334521483,
+        -0.11882112959559925
+      ],
+      "right": [
+        -1.5305286594918261,
+        3.1377429614593266,
+        -0.1188211299290778
+      ],
+      "front_direction": [
+        0.9647091688074105,
+        -0.26331773304561307
+      ],
+      "height": -0.11882112976233852
+    },
+    "geometry_0_1": {
+      "object": "geometry_0",
+      "left": [
+        -1.0899641640296303,
+        2.366127192494674,
+        -0.14982512239424076
+      ],
+      "right": [
+        -0.9415954838659456,
+        2.344065122881188,
+        -0.14982512236206122
+      ],
+      "front_direction": [
+        0.14708045225687708,
+        0.9891245134912873
+      ],
+      "height": -0.149825122378151
+    },
+    "geometry_0_2": {
+      "object": "geometry_0",
+      "left": [
+        -0.42939491373195693,
+        2.6090820192175244,
+        -0.13742352509994252
+      ],
+      "right": [
+        -0.3421647354837131,
+        2.7311102750194745,
+        -0.1374235247897298
+      ],
+      "front_direction": [
+        -0.8135217293718954,
+        0.5815345226525065
+      ],
+      "height": -0.13742352494483615
+    },
+    "geometry_0.016_0": {
+      "object": "geometry_0.016",
+      "left": [
+        2.4533103086789225,
+        6.503348224011178,
+        0.0325
+      ],
+      "right": [
+        2.390689691321078,
+        6.639651775988822,
+        0.0325
+      ],
+      "front_direction": [
+        -0.9086903465176278,
+        -0.4174707823856343
+      ],
+      "height": 0.0325
+    },
+    "geometry_0.016_1": {
+      "object": "geometry_0.016",
+      "left": [
+        2.8088858392499585,
+        6.3903875224214755,
+        0.04
+      ],
+      "right": [
+        2.6651141607500417,
+        6.347612477578524,
+        0.04
+      ],
+      "front_direction": [
+        0.2851669656196714,
+        -0.9584778566661147
+      ],
+      "height": 0.04
+    },
+    "Layout_Window_Desk_Chair_0": {
+      "object": "Layout_Window_Desk_Chair",
+      "left": [
+        3.4567753116823217,
+        6.3893342581191295,
+        0.246
+      ],
+      "right": [
+        3.5972246883176786,
+        6.336665741880871,
+        0.246
+      ],
+      "front_direction": [
+        0.35112344158839015,
+        0.9363291775690451
+      ],
+      "height": 0.246
+    }
+  },
+  "floors": [
+    "Layout_Living_Floor",
+    "Layout_Kitchen_Floor",
+    "Layout_Corridor_Floor"
+  ],
+  "occluders": [
+    "geometry_0",
+    "geometry_0.002",
+    "geometry_0.003",
+    "geometry_0.005",
+    "geometry_0.016",
+    "Layout_Window_Desk_Chair"
+  ],
+  "render_objects": [
+    "Layout_Window_Console",
+    "Layout_Window_Desk_Chair",
+    "Layout_TV_Left_Door",
+    "Layout_TV_Left_Door_Frame",
+    "Layout_TV_Left_Door_Knob",
+    "Layout_TV_Left_Door_Rail_0",
+    "Layout_TV_Left_Door_Rail_1",
+    "Layout_TV_Left_Door_Rail_2",
+    "Layout_TV_Left_Door_Rail_3",
+    "Layout_TV_Left_Transom_Frame",
+    "Layout_TV_Left_Transom_Glass",
+    "Layout_TV_Purple_Door_Frame",
+    "Layout_TV_Purple_Door_Leaf"
+  ],
+  "hide_collections": [
+    "actor1",
+    "camera"
+  ],
+  "depth_mesh_objects": [
+    "Layout_Armchair_Side_Table",
+    "Layout_Coffee_Table_Bowl",
+    "Layout_Corridor_Back_Left",
+    "Layout_Corridor_Back_Left_Wainscot",
+    "Layout_Corridor_Back_Lintel",
+    "Layout_Corridor_Back_Right",
+    "Layout_Corridor_Back_Right_Wainscot",
+    "Layout_Corridor_Floor",
+    "Layout_Corridor_Lintel",
+    "Layout_Entry_Bag_Strap",
+    "Layout_Entry_Clock_Dial",
+    "Layout_Entry_Clock_Hand_H",
+    "Layout_Entry_Clock_Hand_V",
+    "Layout_Entry_Clock_Star",
+    "Layout_Entry_Coat_Back",
+    "Layout_Entry_Coat_Front",
+    "Layout_Entry_Coat_Hook",
+    "Layout_Entry_Hanging_Bag",
+    "Layout_Entry_Left_Wall",
+    "Layout_Entry_Poster_Frame",
+    "Layout_Entry_Poster_Inset",
+    "Layout_Fridge_Back_Wall",
+    "Layout_Kitchen_Floor",
+    "Layout_Living_Floor",
+    "Layout_Living_Rug",
+    "Layout_Living_Wall_Picture_Frame",
+    "Layout_Living_Wall_Picture_Inset",
+    "Layout_Sofa_Lamp_Base",
+    "Layout_Sofa_Lamp_Shade",
+    "Layout_Sofa_Lamp_Stem",
+    "Layout_TV_Cabinet_Top",
+    "Layout_TV_Door_Handle",
+    "Layout_TV_Left_Door",
+    "Layout_TV_Left_Door_Frame",
+    "Layout_TV_Left_Door_Knob",
+    "Layout_TV_Left_Door_Rail_0",
+    "Layout_TV_Left_Door_Rail_1",
+    "Layout_TV_Left_Door_Rail_2",
+    "Layout_TV_Left_Door_Rail_3",
+    "Layout_TV_Left_Transom_Frame",
+    "Layout_TV_Left_Transom_Glass",
+    "Layout_TV_Purple_Door_Frame",
+    "Layout_TV_Purple_Door_Leaf",
+    "Layout_TV_Right_Wall",
+    "Layout_Television",
+    "Layout_Television_Platform",
+    "Layout_Window_Console",
+    "Layout_Window_Desk_Chair",
+    "Layout_Window_Mullion.002",
+    "Layout_Window_Mullion.003",
+    "Layout_Window_Mullion.004",
+    "Layout_Window_Mullion.005",
+    "Layout_Window_Mullion.006",
+    "Layout_Window_Mullion.007",
+    "Layout_Window_Mullion.008",
+    "Layout_Window_Mullion.009",
+    "Layout_Window_Mullion.013",
+    "Layout_Window_Mullion.014",
+    "Layout_Window_Mullion.015",
+    "Layout_Window_Mullion.016",
+    "Layout_Window_Mullion.017",
+    "Layout_Window_Mullion.018",
+    "Layout_Window_Platform",
+    "Layout_Window_Reveal",
+    "geometry_0",
+    "geometry_0.001",
+    "geometry_0.002",
+    "geometry_0.003",
+    "geometry_0.004",
+    "geometry_0.005",
+    "geometry_0.006",
+    "geometry_0.007",
+    "geometry_0.008",
+    "geometry_0.009",
+    "geometry_0.010",
+    "geometry_0.011",
+    "geometry_0.012",
+    "geometry_0.013",
+    "geometry_0.014",
+    "geometry_0.015",
+    "geometry_0.016",
+    "geometry_0.017",
+    "geometry_0.018",
+    "geometry_0.019",
+    "geometry_0.020",
+    "geometry_0.021",
+    "geometry_0.022",
+    "geometry_0.023",
+    "geometry_0.024",
+    "geometry_0.025",
+    "geometry_0.026"
+  ]
+}

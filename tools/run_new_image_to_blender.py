@@ -180,30 +180,7 @@ def measure(stage: str, durations: dict[str, float], action):
     return result
 
 
-def assess_pose_quality(pose: dict) -> dict:
-    """Give dataset selection a conservative label without suppressing previews."""
-    inliers = int(pose["pnp"]["inlier_count"])
-    rmse = float(pose["pnp"]["inlier_rmse_pixels"])
-    sources = pose.get("inlier_source_images", {})
-    dominant_source_inliers = max(sources.values(), default=0)
-    source_concentration = dominant_source_inliers / max(inliers, 1)
-    if inliers >= 40 and rmse <= 4.5:
-        status = "accepted"
-        reasons: list[str] = []
-    elif inliers >= 20 and rmse <= 5.0:
-        status = "review"
-        reasons = ["Pose passes the baseline but needs a preview check before dataset use."]
-    else:
-        status = "rejected"
-        reasons = ["Too few PnP inliers or excessive inlier reprojection error."]
-    return {
-        "status": status,
-        "dataset_eligible": status == "accepted",
-        "pnp_inlier_count": inliers,
-        "pnp_rmse_pixels": rmse,
-        "dominant_source_inlier_fraction": round(source_concentration, 4),
-        "reasons": reasons,
-    }
+from pose_quality import assess_pose_quality
 
 
 def stage_query_image(source: Path, destination: Path, mask: Path | None) -> tuple[Path, Path]:
@@ -563,7 +540,7 @@ def main() -> None:
     coarse_quality = None
     if coarse_ok and coarse_pose_path.is_file():
         coarse_quality = assess_pose_quality(json.loads(coarse_pose_path.read_text()))
-    if coarse_quality is not None and coarse_quality["status"] != "rejected":
+    if coarse_quality is not None and coarse_quality["status"] == "accepted":
         shutil.copy2(coarse_pose_path, pose_path)
     else:
         if coarse_quality is not None:

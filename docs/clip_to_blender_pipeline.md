@@ -1,5 +1,7 @@
 # Clip-to-Blender pipeline
 
+Omega 场景发布、24 镜头回归和新场景接入见 [场景更新流程](omega_scene_workflow.md)。
+
 `tools/run_clip_to_blender.py` treats one input clip as one already-separated shot. It performs absolute localization only on source frames 0 and N-1, then uses a video-level model for every intermediate frame:
 
 1. Decode the selected source range (`--max-frames 99` selects frames 0 through 98).
@@ -79,3 +81,39 @@ software render. `--allow-software-opengl` is available for deliberate CPU
 tests.
 
 The actor representation is intentionally coarse. `bbox_3d.center_world`, `size_world` (`width`, visible `height`, `depth`), and `axes_world` describe each camera-oriented box. The box estimates the visible segmented extent, so an actor cropped by the image boundary does not receive an invented full-body height. It does not estimate SMPL pose, articulated joints, or exact body orientation. Motion supplies a coarse facing estimate; a nearly static actor retains a low-confidence camera-facing prior.
+
+## Omega 精修场景的批量数据产出
+
+批量入口默认使用 `--camera-backend omega`。172 张筛选剧照的精修重建位于
+`/root/userdata/300workspace/merg3r_work/omega_20261119_reviewed172_ba_regularized`。
+`batch_scene.json` 记录了 P70 点云哈希、场景文件哈希、Omega 到 Blender 的相似变换和人物尺度。
+当前场景为 `data/Living_Room_Frame_Checked.blend`，其中的点云与此 P70 点云 SHA-256 一致。
+
+SAM3 生成视频人物遮罩和轨迹。首尾帧对筛选后的 Omega 静态参考图进行 SIFT 匹配和 PnP，
+使用 70% 对应点拟合相机及焦距，并用剩余 30% 验证。验证失败会记录失败原因。
+中间帧继续使用 DA3，通过同一份 Omega 点云拟合深度标尺，并以两个 PnP 端点约束相机轨迹。
+人物代理及相机统一使用 `omega_ba_world`，导入 Blender 时应用已核对的 `pointcloud` 变换。
+
+默认输出为 `outputs/Friends-monica_apartment/clip_render_data_s08_omega_persistent`。
+每个完成的镜头包含 `camera_track.json`、`actor_tracks.json`、`frames.json` 和 `render_job.json`。
+渲染任务记录场景 SHA-256，导入器检查场景中的点云变换。
+
+在 H100 项目目录运行单镜头验收或指定剧集的批次。
+
+```bash
+python3 tools/run_clip_render_data_batch.py   --episode S08E04 --include general_0091_global_0218 --limit 1   --run-name omega_checked_scene_smoke
+
+python3 tools/run_clip_render_data_batch.py   --episode S08E04 --run-name omega_s08e04
+```
+
+`--omega-reconstruction` 和 `--omega-images` 可指定其他已配置的 Omega 场景及参考图目录。
+`--camera-backend colmap` 可调用原有后端。
+
+Omega 人物深度按半秒采样，使用最终相机将静态点云投影到 DA3 图像，排除人物和深度边缘。相机运动继续使用原端点校准。查看 camera_track.json 的 da3.actor_depth_alignment 可见各帧留出区域的残差、人物周围静物残差和实际尺度。时间变化需通过留帧预测和留出像素验证。
+
+
+每个已确认的人物在单镜头全时间轴只创建一个球头圆柱对象。相邻 ID 片段仅在时间不重叠且世界位置、速度、头部投影均唯一匹配时合并。actor_tracks.json 保留 source_track_ids、observed_ranges 和每帧 observation_status（observed、interpolated、hold、motion_extrapolation、offscreen_extrapolation）。出画与家具遮挡由空间位置和相机自然产生。
+
+支撑候选使用绑定场景哈希的坐垫中带、地面和家具深度采样。每半秒估计深度、站立或具体座面候选，按整段证据平滑选择；近景证据不足时交付深度估计。人物分配与镜头名称、人物左右次序无关。Blender 导入只为运动和代理几何插值，人物全程保持正缩放。
+
+验证工具 tools/verify_clip_presence_blender.py 在 Blender 后台接受 --bundles 和 --output，检查每帧对象身份、渲染可见性和真实几何变换，并导出预演和每帧轮廓投影。每个输入视频应对应单个连续镜头。

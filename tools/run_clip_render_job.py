@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=0)
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--end-frame", type=int, default=0)
+    parser.add_argument("--actor-proxy-style", choices=("cylinder", "head-cylinder"), default="head-cylinder")
     parser.add_argument("--reuse-scene", action="store_true")
     parser.add_argument("--allow-software-opengl", action="store_true")
     return parser.parse_args()
@@ -83,6 +84,9 @@ def main() -> None:
 
     suggested_blend = Path(job["source_scene"]["suggested_path"])
     base_blend = require_file(args.base_blend or suggested_blend, "Base Blender scene")
+    expected_scene_hash = job["source_scene"].get("sha256")
+    if expected_scene_hash and file_sha256(base_blend) != expected_scene_hash:
+        raise ValueError("Base Blender scene differs from the checked batch scene")
     importer = require_file(args.importer, "Clip animation importer")
     scene_import = job["scene_import"]
     timeline = job["timeline"]
@@ -99,6 +103,9 @@ def main() -> None:
         command = [
             args.blender_executable,
             "--background",
+            "--disable-autoexec",
+            "--python-exit-code",
+            "1",
             str(base_blend),
             "--python",
             str(importer),
@@ -115,6 +122,8 @@ def main() -> None:
             job["coordinate_system"]["alignment_object"],
             "--camera-name",
             scene_import["camera_name"],
+            "--actor-proxy-style",
+            args.actor_proxy_style,
             "--fps",
             str(timeline["fps"]),
         ]

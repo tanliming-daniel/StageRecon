@@ -38,6 +38,12 @@ def actor_proxy_settings(actor_tracks: dict) -> dict:
             "type": "legacy_floor_cylinder_with_facing_arrow",
             "uses_posture_scale": True,
         }
+    seated = [t["track_id"] for t in actor_tracks.get("tracks", []) if t.get("seat_contact")]
+    if seated:
+        return {"type": "seat_center_head_cylinder", "seated_tracks": seated,
+                "facing_marker": "cream_horizontal_spherical_band",
+                "seated_anchor": "pelvis_world", "head_anchor": "head_anchor_world",
+                "other_tracks": "fixed_head_cylinder"}
     frames = next(
         (
             track.get("frames", [])
@@ -52,9 +58,12 @@ def actor_proxy_settings(actor_tracks: dict) -> dict:
         else "bbox_3d.center_world"
     )
     return {
-        "type": "fixed_cylinder",
-        "radius": 0.18,
-        "height": 1.70,
+        "type": "fixed_head_cylinder",
+        "facing_marker": "cream_horizontal_spherical_band",
+        "radius": float(actor_tracks.get("proxy_convention", {}).get("radius_world", 0.18)),
+        "height": float(actor_tracks.get("proxy_convention", {}).get("height_world", 1.70)),
+        "size_policy": "fixed_for_entire_clip",
+        "anchor": "head_top_world",
         "position_source": position_source,
         "uses_bbox_size": False,
         "uses_posture_scale": False,
@@ -134,6 +143,8 @@ def write_render_job(
             "suggested_path": str(base_blend.resolve()),
             "filename": base_blend.name,
             "supply_on_render_machine": True,
+            **({"sha256": camera_track["scene_frame"]["source_blend_sha256"]}
+               if camera_track.get("scene_frame") else {}),
         },
         "timeline": {
             "source_frame_range_inclusive": [0, frame_count - 1],
@@ -143,7 +154,7 @@ def write_render_job(
         },
         "scene_import": {
             "camera_name": camera_name,
-            "hide_collections": list(hide_collections),
+            "hide_collections": camera_track.get("scene_frame", {}).get("hide_collections", list(hide_collections)),
             "actor_proxy": actor_proxy_settings(actor_tracks),
             "active_camera": camera_name,
         },

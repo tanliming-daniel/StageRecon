@@ -18,6 +18,7 @@ Only the first and last frames are sent through PnP.
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import json
 import time
 from pathlib import Path
@@ -30,10 +31,13 @@ from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation
 
 from depth_anything_3.api import DepthAnything3
+from pose_quality import require_usable_anchor
+from registered_anchors import intrinsics_between_anchors
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--allow-review-anchors", action="store_true")
     parser.add_argument("--frames-dir", type=Path, required=True)
     parser.add_argument("--mask-dir", type=Path)
     parser.add_argument("--anchor-localization", type=Path, required=True)
@@ -79,6 +83,7 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Savitzky-Golay polynomial order.",
     )
+    parser.add_argument("--scene-pointcloud", type=Path, help="Point cloud in the endpoint camera coordinate system.")
     parser.add_argument(
         "--translation-scale",
         type=float,
@@ -94,6 +99,7 @@ def require_file(path: Path, label: str) -> Path:
     return path
 
 
+@lru_cache(maxsize=1)
 def read_xyz_ply(path: Path) -> np.ndarray:
     """Read xyz from the binary/ascii PLY used by the Sitcoms3D scenes."""
     with path.open("rb") as stream:
@@ -302,6 +308,12 @@ def smooth_focal_ratios(
     return np.clip(ratios, 0.5, 2.0)
 
 
+def camera_parameters(pose):
+    if pose.get("pose_source") == "estimated_omega_joint_reference_model":
+        return {"intrinsics": pose["camera_intrinsics"], "focal": pose["focal_pixels"]}
+    return pose["pnp"]
+
+
 def localization_c2w(localization: dict) -> tuple[np.ndarray, float]:
     """Convert one existing PnP localization to C2W and return its focal."""
     rotation = np.asarray(localization["world_to_camera_rotation"], dtype=np.float64)
@@ -309,7 +321,7 @@ def localization_c2w(localization: dict) -> tuple[np.ndarray, float]:
     c2w = np.eye(4, dtype=np.float64)
     c2w[:3, :3] = rotation.T
     c2w[:3, 3] = -rotation.T @ translation
-    return c2w, float(localization["pnp"]["focal"])
+    return c2w, float(camera_parameters(localization)["focal"])
 
 
 def constrain_trajectory_to_tail_anchor(
@@ -373,6 +385,16 @@ def main() -> None:
     tail_anchor_path = require_file(
         args.tail_anchor_localization, "Tail anchor localization"
     )
+    anchor = json.loads(anchor_path.read_text())
+    tail_anchor = json.loads(tail_anchor_path.read_text())
+    for endpoint in (anchor,tail_anchor):
+        if endpoint.get("pose_source") == "estimated_omega_joint_reference_model":
+            q=endpoint.get("quality",{})
+            if (not args.allow_review_anchors or endpoint.get("coordinate_system")!="omega_ba_world"
+                    or q.get("fit_reference_views",0)<10 or not 0<=q.get("heldout_reference_median_at512",float("inf"))<12):
+                raise ValueError("Unvalidated joint-model endpoint requires explicit review-preview mode and reference agreement")
+        else:
+            require_usable_anchor(endpoint, allow_review=args.allow_review_anchors)
     model_path = args.model.resolve()
     if not (model_path / "model.safetensors").is_file():
         raise FileNotFoundError(f"DA3 model.safetensors not found in {model_path}")
@@ -437,12 +459,10 @@ def main() -> None:
         args.smooth_polyorder,
     )
 
-    anchor = json.loads(anchor_path.read_text())
-    tail_anchor = json.loads(tail_anchor_path.read_text())
     anchor_rotation = np.asarray(anchor["world_to_camera_rotation"], dtype=np.float64)
     anchor_translation = np.asarray(anchor["world_to_camera_translation"], dtype=np.float64)
     anchor_center = -anchor_rotation.T @ anchor_translation
-    anchor_intrinsics = np.asarray(anchor["pnp"]["intrinsics"], dtype=np.float64)
+    anchor_intrinsics = np.asarray(camera_parameters(anchor)["intrinsics"], dtype=np.float64)
 
     mask = None
     if args.mask_dir is not None:
@@ -452,13 +472,18 @@ def main() -> None:
             if mask is not None and mask.shape != (original_height, original_width):
                 mask = resize_mask(mask, original_width, original_height)
 
+    omega_world = anchor.get("coordinate_system") == "omega_ba_world"
+    if omega_world != (tail_anchor.get("coordinate_system") == "omega_ba_world"):
+        raise ValueError("Endpoint coordinate systems differ")
+    if omega_world and args.scene_pointcloud is None and args.translation_scale is None:
+        raise ValueError("Omega camera anchors require an Omega point cloud for depth scaling")
     if args.translation_scale is not None:
         if args.translation_scale <= 0:
             raise ValueError("--translation-scale must be positive")
         translation_scale = float(args.translation_scale)
         scale_stats = {"method": "explicit_override", "scale": translation_scale}
     else:
-        pointcloud = require_file(args.environment_dir.resolve() / "colmap/pc.ply", "COLMAP PLY")
+        pointcloud = require_file(args.scene_pointcloud or args.environment_dir.resolve() / "colmap/pc.ply", "Scene PLY")
         xyz_world = read_xyz_ply(pointcloud)
         translation_scale, scale_stats = estimate_scene_scale(
             xyz_world,
@@ -471,6 +496,8 @@ def main() -> None:
             mask,
         )
 
+    if omega_world:
+        scale_stats["method"] = scale_stats["method"].replace("colmap_sparse", "omega_p70")
     anchor_c2w, anchor_focal = localization_c2w(anchor)
     tail_anchor_c2w, tail_anchor_focal = localization_c2w(tail_anchor)
     focal_ratios = smooth_focal_ratios(
@@ -506,21 +533,23 @@ def main() -> None:
         translation = absolute_w2c[:3, 3]
         center = frame_c2w[:3, 3]
         focal = float(absolute_focals[index])
-        intrinsic = np.array(
-            [[focal, 0.0, original_width / 2], [0.0, focal, original_height / 2], [0.0, 0.0, 1.0]],
-            dtype=np.float64,
+        intrinsic = intrinsics_between_anchors(
+            camera_parameters(anchor)["intrinsics"], camera_parameters(tail_anchor)["intrinsics"],
+            focal, index / max(len(frame_paths) - 1, 1),
         )
         if index == 0:
             quality = {
                 "status": "anchor",
-                "pnp_inlier_count": int(anchor["pnp"]["inlier_count"]),
-                "pnp_rmse_pixels": float(anchor["pnp"]["inlier_rmse_pixels"]),
+                "pose_source": anchor.get("pose_source", "estimated_disk_pnp"),
+                "pnp_inlier_count": anchor.get("pnp",{}).get("inlier_count"),
+                "pnp_rmse_pixels": anchor.get("pnp",{}).get("inlier_rmse_pixels"),
             }
         elif index == len(frame_paths) - 1:
             quality = {
                 "status": "tail_anchor",
-                "pnp_inlier_count": int(tail_anchor["pnp"]["inlier_count"]),
-                "pnp_rmse_pixels": float(tail_anchor["pnp"]["inlier_rmse_pixels"]),
+                "pose_source": tail_anchor.get("pose_source", "estimated_disk_pnp"),
+                "pnp_inlier_count": tail_anchor.get("pnp",{}).get("inlier_count"),
+                "pnp_rmse_pixels": tail_anchor.get("pnp",{}).get("inlier_rmse_pixels"),
             }
         else:
             quality = {
@@ -543,6 +572,16 @@ def main() -> None:
             }
         )
 
+    depth_report = None
+    if omega_world and args.translation_scale is None and args.mask_dir is not None:
+        from omega_depth_alignment import calibrate
+        meta_path = args.frames_dir.parent / "frames.json"
+        fps = json.loads(meta_path.read_text()).get("fps", 24) if meta_path.exists() else 24
+        depth_report, actor_scales = calibrate(xyz_world, frames, depth, confidence,
+            args.mask_dir, (original_width, original_height), max(1, round(float(fps) / 2)), translation_scale)
+        for frame, scale in zip(frames, actor_scales):
+            frame["actor_depth_scale"] = float(scale)
+
     absolute_centers = np.asarray([frame["camera_center"] for frame in frames])
     step_distances = np.linalg.norm(np.diff(absolute_centers, axis=0), axis=1)
     corrected_relative_rotations = (
@@ -552,8 +591,8 @@ def main() -> None:
     rotation_from_first = np.degrees(relative_rotations.magnitude())
     result = {
         "schema_version": 2,
-        "model": "depth_anything_3_large_full_clip_dual_endpoint_pnp",
-        "coordinate_system": "raw_colmap_world (same as environment_dir/colmap/pc.ply)",
+        "model": ("depth_anything_3_large_full_clip_dual_endpoint_pnp" if "pnp" in anchor and "pnp" in tail_anchor else "da3_with_review_only_omega_joint_anchors"),
+        "coordinate_system": "omega_ba_world" if omega_world else "raw_colmap_world (same as environment_dir/colmap/pc.ply)",
         "anchor_frame_index": 0,
         "anchor_frame_name": frame_paths[0].name,
         "anchor_localization": str(anchor_path),
@@ -561,6 +600,12 @@ def main() -> None:
         "tail_anchor_frame_name": frame_paths[-1].name,
         "tail_anchor_localization": str(tail_anchor_path),
         "absolute_localization_frames": [0, len(frame_paths) - 1],
+        "absolute_anchor_policy": anchor.get("requested_anchor_source", "estimated"),
+        "absolute_anchor_provenance": [
+            {"frame_index": i, "pose_source": p.get("pose_source", "estimated_disk_pnp"),
+             "registration": p.get("registration"), "quality": p.get("quality")}
+            for i, p in ((0, anchor), (len(frame_paths) - 1, tail_anchor))
+        ],
         "resolution": {"width": original_width, "height": original_height},
         "camera_center": frames[0]["camera_center"],
         "da3": {
@@ -578,13 +623,14 @@ def main() -> None:
             },
             "translation_scale": translation_scale,
             "translation_scale_fit": scale_stats,
+            **({"actor_depth_alignment": depth_report} if depth_report else {}),
             "endpoint_correction": endpoint_correction,
         },
         "summary": {
             "frame_count": len(frames),
             "tracked_transition_count": len(frames) - 1,
             "held_transition_count": 0,
-            "translation_scale_to_colmap": translation_scale,
+            ("translation_scale_to_omega" if omega_world else "translation_scale_to_colmap"): translation_scale,
             "camera_path_length_world": float(step_distances.sum()),
             "camera_displacement_from_first_world": float(np.linalg.norm(absolute_centers[-1] - absolute_centers[0])),
             "camera_max_displacement_from_first_world": float(

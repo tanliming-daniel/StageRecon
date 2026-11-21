@@ -12,6 +12,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from batch_protocol import portable_bundle_is_valid
+from omega_review import sha256, read, copy_bundle, scene_signature
+from actor_proxy_config import resolve_actor_world_up
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +24,8 @@ DEFAULT_ENVIRONMENT = (
     REPO_ROOT / "sitcoms3D/data/sparse_reconstruction_and_nerf_data/Friends-monica_apartment"
 )
 DEFAULT_BLEND = REPO_ROOT / "data/scene_with_clip_animation.blend"
+DEFAULT_OMEGA = Path("/root/userdata/300workspace/merg3r_work/omega_20261119_reviewed172_ba_regularized")
+DEFAULT_OMEGA_IMAGES = REPO_ROOT / "data/sparse_reconstruction_and_image_data/Friends-monica_apartment/images"
 DEFAULT_SAM3_PYTHON = Path("/root/userdata/300workspace/sm3r/bin/python")
 DEFAULT_DA3_PYTHON = Path("/root/userdata/300workspace/da3/bin/python")
 DEFAULT_SAM3_ROOT = Path("/root/userdata/300workspace/sam3")
@@ -39,11 +44,15 @@ STAGE2_WORKER = REPO_ROOT / "tools/clip_data_stage2_worker.py"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clips-root", type=Path, default=DEFAULT_CLIPS_ROOT)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--run-name", default="main")
     parser.add_argument("--manifest-name", default="batch_manifest.json")
     parser.add_argument("--environment-dir", type=Path, default=DEFAULT_ENVIRONMENT)
-    parser.add_argument("--base-blend", type=Path, default=DEFAULT_BLEND)
+    parser.add_argument("--base-blend", type=Path)
+    parser.add_argument("--camera-backend", choices=("omega", "colmap"), default="omega")
+    parser.add_argument("--omega-reconstruction", type=Path, default=DEFAULT_OMEGA)
+    parser.add_argument("--omega-scene-config", type=Path, help="Scene profile for this reconstruction; default: its batch_scene.json")
+    parser.add_argument("--omega-images", type=Path)
     parser.add_argument("--sam3-python", type=Path, default=DEFAULT_SAM3_PYTHON)
     parser.add_argument("--da3-python", type=Path, default=DEFAULT_DA3_PYTHON)
     parser.add_argument("--sam3-root", type=Path, default=DEFAULT_SAM3_ROOT)
@@ -51,21 +60,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disk-checkpoint", type=Path, default=DEFAULT_DISK_CHECKPOINT)
     parser.add_argument("--global-index", type=Path, default=DEFAULT_GLOBAL_INDEX)
     parser.add_argument("--da3-model", type=Path, default=DEFAULT_DA3_MODEL)
-    parser.add_argument("--stage1-gpu", default="1")
+    parser.add_argument("--actor-world-up", type=float, nargs=3)
+    parser.add_argument("--anchor-source", choices=("registered-first", "estimated"))
+    parser.add_argument("--registered-images-dir", type=Path, action="append", default=[])
+    parser.add_argument("--stage1-gpu", default="4")
     parser.add_argument("--stage2-gpu", default="4")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--case-list",type=Path,help="Ordered JSON array of clip paths or records with a clip field")
     parser.add_argument("--episode", action="append", default=[])
     parser.add_argument("--include", default="", help="Only paths containing this text")
+    parser.add_argument("--dry-run", action="store_true", help="Print the execution plan without starting model workers.")
+    parser.add_argument("--use-reviewed", action=argparse.BooleanOptionalAction, default=True, help="Use published results for matching source clips and scene")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--retry-failed", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
 def valid_bundle(directory: Path) -> bool:
-    expected = {
-        "camera_track.json", "actor_tracks.json", "frames.json", "render_job.json"
-    }
-    return directory.is_dir() and {path.name for path in directory.iterdir()} == expected
+    return portable_bundle_is_valid(directory)
 
 
 def clip_output(video: Path, clips_root: Path, output_root: Path) -> Path:
@@ -161,6 +173,54 @@ def read_line(process: subprocess.Popen, label: str) -> dict:
 
 def main() -> None:
     args = parse_args()
+    use_omega = args.camera_backend == "omega"
+    omega_pointcloud = None
+    omega_units_per_meter = 1.0
+    review_index = None
+    reviewed_jobs = []
+    if use_omega:
+        if args.anchor_source not in (None, "estimated"):
+            raise ValueError("Omega requires --anchor-source estimated")
+        args.anchor_source = "estimated"
+        omega = args.omega_reconstruction.resolve()
+        scene_path = (args.omega_scene_config or omega / "batch_scene.json").resolve()
+        scene = read(scene_path)
+        args.omega_images = args.omega_images or (omega / scene["reference_images"] if scene.get("reference_images") else DEFAULT_OMEGA_IMAGES)
+        if scene["coordinate_system"] != "omega_ba_world":
+            raise ValueError("Invalid Omega batch scene coordinate system")
+        args.base_blend = args.base_blend or omega / scene["blend"]
+        args.output_root = args.output_root or DEFAULT_OUTPUT_ROOT.with_name(DEFAULT_OUTPUT_ROOT.name + "_omega_shoulders_p075_" + scene["source_blend_sha256"][:8])
+        omega_pointcloud = omega / scene["pointcloud"]
+        if scene.get("predictions_sha256") and sha256(omega/"predictions.npz")!=scene["predictions_sha256"]:
+            raise ValueError("Omega predictions differ from the registered reconstruction")
+        if sha256(omega_pointcloud)!=scene["pointcloud_sha256"]:
+            raise ValueError("Point cloud differs from the registered Omega scene")
+        if sha256(args.base_blend)!=scene["source_blend_sha256"]:
+            raise ValueError("Base blend differs from the registered Omega scene; prepare a new scene profile")
+        if (args.use_reviewed and scene.get("review_index") and args.actor_world_up is None
+                and args.da3_model.resolve()==DEFAULT_DA3_MODEL.resolve()
+                and args.sam3_checkpoint.resolve()==DEFAULT_SAM3_CHECKPOINT.resolve()
+                and args.omega_images.resolve()==(omega / scene.get("reference_images", args.omega_images)).resolve()):
+            index_path = omega / scene["review_index"]
+            review_index = read(index_path)
+            if (review_index["profile_sha256"]!=scene_signature(scene) or
+                    review_index["scene_sha256"]!=scene["source_blend_sha256"] or
+                    review_index["pointcloud_sha256"]!=scene["pointcloud_sha256"]):
+                raise ValueError("Reviewed bundle index does not match the selected scene")
+        omega_units_per_meter = float(scene["omega_units_per_meter"])
+        if not (0 < omega_units_per_meter < float("inf")):
+            raise ValueError("Invalid Omega scene units per meter")
+        args.actor_world_up = args.actor_world_up or scene["world_up"]
+        for path in (omega_pointcloud, omega / "predictions.npz", args.base_blend):
+            if not path.is_file():
+                raise FileNotFoundError(path)
+        if not args.omega_images.is_dir():
+            raise FileNotFoundError(args.omega_images)
+    else:
+        args.anchor_source = args.anchor_source or "registered-first"
+        args.base_blend = args.base_blend or DEFAULT_BLEND
+        args.output_root = args.output_root or DEFAULT_OUTPUT_ROOT
+    args.actor_world_up = resolve_actor_world_up(args.environment_dir, args.base_blend, args.actor_world_up, REPO_ROOT / "configs/scenes")
     clips_root = args.clips_root.resolve()
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -172,7 +232,13 @@ def main() -> None:
     failure_history_path = output_root / "failed_clips_history.jsonl"
     manifest = read_manifest(manifest_path)
 
-    videos = sorted(clips_root.rglob("*.mp4"))
+    if args.case_list:
+        selected = read(args.case_list)
+        videos = [clips_root / (c if isinstance(c,str) else c["clip"]) for c in selected]
+        for video in videos:
+            if not video.is_file():raise FileNotFoundError(video)
+    else:
+        videos = sorted(clips_root.rglob("*.mp4"))
     if args.episode:
         episodes = set(args.episode)
         videos = [video for video in videos if video.relative_to(clips_root).parts[0] in episodes]
@@ -186,6 +252,34 @@ def main() -> None:
         relative = str(video.relative_to(clips_root))
         output_dir = clip_output(video, clips_root, output_root)
         current = manifest["clips"].get(relative, {})
+        entry = review_index["clips"].get(Path(relative).as_posix()) if review_index else None
+        if entry:
+            video_hash = sha256(video)
+            if video_hash == entry["video_sha256"]:
+                approved = index_path.parent / entry["bundle"]
+                if not valid_bundle(approved) or sha256(approved/"render_job.json") != entry["job_sha256"]:
+                    raise ValueError(f"Invalid published review: {approved}")
+                reviewed_jobs.append(relative)
+                if not args.dry_run:
+                    copy_bundle(approved, output_dir, args.overwrite)
+                    manifest["clips"][relative] = dict(status="completed",source="published_review",
+                        video=str(video.resolve()),output_dir=str(output_dir.resolve()),video_sha256=video_hash)
+                continue
+            if valid_bundle(output_dir) and not args.overwrite:
+                raise ValueError(f"Video changed since review: {video}; use a fresh output root or --overwrite")
+        if valid_bundle(output_dir):
+            prior = json.loads((output_dir / "render_job.json").read_text())
+            prior_omega = prior["coordinate_system"]["camera"] == "omega_ba_world"
+            if prior_omega != use_omega:
+                raise ValueError(f"Bundle uses different scene coordinates: {output_dir}; select another --output-root")
+            if use_omega and not args.overwrite:
+                if prior.get("source_scene", {}).get("sha256") != scene["source_blend_sha256"]:
+                    raise ValueError(f"Existing bundle uses a different base scene: {output_dir}")
+                method = json.loads((output_dir / "actor_tracks.json").read_text()).get("animation_method")
+                if method != "omega_sam3d_shoulders_v2":
+                    raise ValueError(f"Existing bundle predates actor keyframes: {output_dir}; select another --output-root")
+        if not args.use_reviewed and current.get("source")=="published_review" and not args.overwrite:
+            raise ValueError("Use a fresh output root or --overwrite to recompute a published review")
         if valid_bundle(output_dir) and not args.overwrite:
             manifest["clips"][relative] = {
                 **current,
@@ -199,6 +293,14 @@ def main() -> None:
         pending.append(
             {"clip_key": relative, "video": str(video.resolve()), "output_dir": str(output_dir.resolve())}
         )
+
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "reviewed_jobs": reviewed_jobs, "selected_clips": len(videos),
+                          "anchor_source": args.anchor_source, "camera_backend": args.camera_backend,
+                          "base_blend": str(args.base_blend),
+                          "stage1_gpu": args.stage1_gpu, "stage2_gpu": args.stage2_gpu,
+                          "actor_world_up": args.actor_world_up, "jobs": pending}, indent=2))
+        return
 
     write_manifest(manifest_path, manifest)
     print(
@@ -220,10 +322,12 @@ def main() -> None:
         [
             str(args.sam3_python.resolve()), str(STAGE1_WORKER),
             "--environment-dir", str(args.environment_dir.resolve()),
+            "--anchor-source", args.anchor_source,
+            *[item for directory in args.registered_images_dir for item in ("--registered-images-dir", str(directory.resolve()))],
             "--sam3-root", str(args.sam3_root.resolve()),
             "--sam3-checkpoint", str(args.sam3_checkpoint.resolve()),
-            "--disk-checkpoint", str(args.disk_checkpoint.resolve()),
-            "--global-index", str(args.global_index.resolve()),
+            *(["--omega-reconstruction", str(args.omega_reconstruction.resolve()), "--omega-images", str(args.omega_images.resolve())]
+              if use_omega else ["--disk-checkpoint", str(args.disk_checkpoint.resolve()), "--global-index", str(args.global_index.resolve())]),
         ],
         args.stage1_gpu,
         cache_root,
@@ -236,6 +340,10 @@ def main() -> None:
             "--da3-model", str(args.da3_model.resolve()),
             "--da3-device", "cuda:0",
             "--base-blend", str(args.base_blend.resolve()),
+            *(["--omega-scene-config", str(scene_path)] if use_omega else []),
+            *(["--omega-pointcloud", str(omega_pointcloud), "--omega-units-per-meter", str(omega_units_per_meter)]
+              if omega_pointcloud else []),
+            *(["--actor-world-up", *[format(value, ".17f") for value in args.actor_world_up]] if args.actor_world_up is not None else []),
         ],
         args.stage2_gpu,
         cache_root,
@@ -253,6 +361,7 @@ def main() -> None:
         selector.register(stage2.stdout, selectors.EVENT_READ, "stage2")
         next_job = 0
         stage1_busy = False
+        stage1_finished = False
         stage2_busy = False
         stage2_queue: list[dict] = []
         completed = 0
@@ -286,7 +395,7 @@ def main() -> None:
         while completed + failed < len(pending):
             events = selector.select(timeout=30.0)
             if not events:
-                if stage1.poll() is not None or stage2.poll() is not None:
+                if (not stage1_finished and stage1.poll() is not None) or stage2.poll() is not None:
                     raise RuntimeError(
                         f"A worker exited unexpectedly: stage1={stage1.poll()} stage2={stage2.poll()}"
                     )
@@ -309,10 +418,18 @@ def main() -> None:
                         failed += 1
                         manifest["clips"][clip_key] = {**message, "status": "failed", "failed_stage": 1}
                         append_failure(failure_history_path, message, 1, args.run_name)
-                    start_stage1()
+                    if next_job==len(pending):
+                        selector.unregister(stage1.stdout)
+                        stage1.stdin.close()
+                        stage1.wait()
+                        stage1_finished=True
+                    else:
+                        start_stage1()
                     start_stage2()
                 else:
                     stage2_busy = False
+                    if message["status"] == "ok" and not valid_bundle(Path(message["output_dir"])):
+                        message = {**message, "status": "failed", "error": "Stage2 reported success but output bundle failed validation"}
                     if message["status"] == "ok":
                         completed += 1
                         manifest["clips"][clip_key] = {

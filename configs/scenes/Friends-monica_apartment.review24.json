@@ -1,0 +1,122 @@
+[
+  {
+    "clip": "S08E04/reference_clips/clean/general_0146_global_0276_f00023032-f00023105.mp4",
+    "split": "dev",
+    "sampling_stratum": "group"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0084_global_0208_f00017659-f00017686.mp4",
+    "split": "dev",
+    "sampling_stratum": "close"
+  },
+  {
+    "clip": "S08E17/reference_clips/clean/general_0067_global_0152_f00011201-f00011260.mp4",
+    "split": "dev",
+    "sampling_stratum": "occlusion"
+  },
+  {
+    "clip": "S08E21/reference_clips/clean/general_0050_global_0293_f00020834-f00020887.mp4",
+    "split": "dev",
+    "sampling_stratum": "motion"
+  },
+  {
+    "clip": "S08E14/reference_clips/clean/general_0034_global_0109_f00006651-f00006692.mp4",
+    "split": "dev",
+    "sampling_stratum": "transition"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0012_global_0065_f00004065-f00004128.mp4",
+    "split": "dev",
+    "sampling_stratum": "entry"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0116_global_0243_f00020400-f00020426.mp4",
+    "split": "holdout",
+    "sampling_stratum": "group"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0124_global_0251_f00020827-f00020879.mp4",
+    "split": "holdout",
+    "sampling_stratum": "close"
+  },
+  {
+    "clip": "S08E19/reference_clips/clean/general_0024_global_0025_f00002295-f00002344.mp4",
+    "split": "holdout",
+    "sampling_stratum": "occlusion"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0090_global_0214_f00017991-f00018067.mp4",
+    "split": "holdout",
+    "sampling_stratum": "motion"
+  },
+  {
+    "clip": "S08E22/reference_clips/clean/general_0097_global_0193_f00013937-f00014006.mp4",
+    "split": "holdout",
+    "sampling_stratum": "transition"
+  },
+  {
+    "clip": "S08E07/reference_clips/clean/general_0020_global_0114_f00009248-f00009291.mp4",
+    "split": "holdout",
+    "sampling_stratum": "entry"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0118_global_0245_f00020458-f00020515.mp4",
+    "split": "dev",
+    "sampling_stratum": "group"
+  },
+  {
+    "clip": "S08E17/reference_clips/clean/general_0086_global_0171_f00013147-f00013180.mp4",
+    "split": "dev",
+    "sampling_stratum": "close"
+  },
+  {
+    "clip": "S08E03/reference_clips/clean/general_0015_global_0017_f00001406-f00001481.mp4",
+    "split": "dev",
+    "sampling_stratum": "occlusion"
+  },
+  {
+    "clip": "S08E03/reference_clips/clean/general_0027_global_0029_f00002512-f00002568.mp4",
+    "split": "dev",
+    "sampling_stratum": "motion"
+  },
+  {
+    "clip": "S08E07/reference_clips/clean/general_0004_global_0004_f00000272-f00000348.mp4",
+    "split": "dev",
+    "sampling_stratum": "transition"
+  },
+  {
+    "clip": "S08E14/reference_clips/clean/general_0045_global_0120_f00007531-f00007592.mp4",
+    "split": "dev",
+    "sampling_stratum": "entry"
+  },
+  {
+    "clip": "S08E22/reference_clips/clean/general_0025_global_0110_f00006685-f00006740.mp4",
+    "split": "holdout",
+    "sampling_stratum": "group"
+  },
+  {
+    "clip": "S08E17/reference_clips/clean/general_0094_global_0207_f00016835-f00016898.mp4",
+    "split": "holdout",
+    "sampling_stratum": "close"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0036_global_0089_f00006204-f00006265.mp4",
+    "split": "holdout",
+    "sampling_stratum": "occlusion"
+  },
+  {
+    "clip": "S08E19/reference_clips/clean/general_0022_global_0023_f00002093-f00002164.mp4",
+    "split": "holdout",
+    "sampling_stratum": "motion"
+  },
+  {
+    "clip": "S08E04/reference_clips/clean/general_0142_global_0269_f00022760-f00022810.mp4",
+    "split": "holdout",
+    "sampling_stratum": "transition"
+  },
+  {
+    "clip": "S08E07/reference_clips/clean/general_0091_global_0313_f00025504-f00025578.mp4",
+    "split": "holdout",
+    "sampling_stratum": "entry"
+  }
+]

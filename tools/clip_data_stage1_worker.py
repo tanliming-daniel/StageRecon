@@ -11,6 +11,8 @@ import shutil
 import sys
 import time
 import traceback
+from batch_protocol import stage_result
+from registered_anchors import registered_anchor
 from collections import defaultdict
 from pathlib import Path
 
@@ -34,6 +36,7 @@ from sitcoms3D.utils.colmap_utils import read_model  # noqa: E402
 
 import extract_person_tracks_sam3 as sam3_tracker  # noqa: E402
 import localize_query_from_disk as localizer  # noqa: E402
+from omega_clip_localizer import OmegaPnPLocalizer  # noqa: E402
 from run_clip_to_blender import extract_frames  # noqa: E402
 from run_new_image_to_blender import assess_pose_quality, compact_visual_features  # noqa: E402
 
@@ -77,7 +80,7 @@ class DiskPnPLocalizer:
         # even though both models share one long-lived process.
         self.disk = self.disk.float().cuda()
 
-        _, images, points3d = read_model(str(self.environment / "colmap"), ext="")
+        self.cameras, images, points3d = read_model(str(self.environment / "colmap"), ext="")
         self.images_by_stem = {Path(image.name).stem: image for image in images.values()}
         self.points3d = points3d
         self.reference_mask_dir = self.environment / "segmentations" / "thing"
@@ -369,7 +372,7 @@ class DiskPnPLocalizer:
         except Exception as error:  # global retrieval is the tested fallback
             coarse_error = f"{type(error).__name__}: {error}"
         coarse_quality = assess_pose_quality(coarse_pose) if coarse_pose is not None else None
-        if coarse_quality is not None and coarse_quality["status"] != "rejected":
+        if coarse_quality is not None and coarse_quality["status"] == "accepted":
             selected = coarse_pose
         else:
             global_pose = self.localize(
@@ -398,6 +401,26 @@ class DiskPnPLocalizer:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(selected, indent=2) + "\n")
         return selected
+
+    def endpoint_for_clip(self, image_path, mask_path, output, video, frame_index,
+                          frame_count, anchor_source, reference_dirs):
+        reason = None
+        if anchor_source == "registered-first":
+            pose, reason = registered_anchor(video, frame_index, frame_count, image_path,
+                                             self.cameras, self.images_by_stem, self.points3d,
+                                             reference_dirs)
+            if pose is not None:
+                pose["quality"] = assess_pose_quality(pose)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(json.dumps(pose, indent=2) + "\n")
+                return pose
+        pose = self.endpoint(image_path, mask_path, output)
+        pose["pose_source"] = "estimated_disk_pnp"
+        pose["requested_anchor_source"] = anchor_source
+        if reason is not None:
+            pose["registered_lookup_fallback"] = reason
+        output.write_text(json.dumps(pose, indent=2) + "\n")
+        return pose
 
     def endpoint(self, image_path: Path, mask_path: Path, output: Path) -> dict:
         attempts: list[tuple[str, Path]] = [("", mask_path)]
@@ -469,14 +492,19 @@ def run_sam3_tracker(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--anchor-source", choices=("registered-first", "estimated"), default="registered-first")
+    parser.add_argument("--registered-images-dir", type=Path, action="append", default=[])
+    parser.add_argument("--keep-failed-output", action="store_true")
     parser.add_argument("--environment-dir", type=Path, required=True)
     parser.add_argument("--sam3-root", type=Path, required=True)
     parser.add_argument("--sam3-checkpoint", type=Path, required=True)
     parser.add_argument("--sam3-version", default="sam3")
-    parser.add_argument("--sam3-prob-threshold", type=float, default=0.45)
+    parser.add_argument("--sam3-prob-threshold", type=float, default=0.75)
     parser.add_argument("--sam3-dilate-pixels", type=int, default=12)
-    parser.add_argument("--disk-checkpoint", type=Path, required=True)
-    parser.add_argument("--global-index", type=Path, required=True)
+    parser.add_argument("--omega-reconstruction", type=Path)
+    parser.add_argument("--omega-images", type=Path)
+    parser.add_argument("--disk-checkpoint", type=Path)
+    parser.add_argument("--global-index", type=Path)
     parser.add_argument("--jpeg-quality", type=int, default=95)
     return parser.parse_args()
 
@@ -498,12 +526,22 @@ def main() -> None:
         compile=False,
         async_loading_frames=False,
     )
-    print("[stage1] loading DISK and scene localization cache", file=sys.stderr, flush=True)
-    pnp = DiskPnPLocalizer(
-        environment=args.environment_dir,
-        checkpoint=args.disk_checkpoint,
-        global_index=args.global_index,
-    )
+    if args.omega_reconstruction:
+        if args.anchor_source != "estimated" or args.omega_images is None:
+            raise ValueError("Omega endpoints require --anchor-source estimated and --omega-images")
+        print("[stage1] preparing Omega static references", file=sys.stderr, flush=True)
+        pnp = OmegaPnPLocalizer(args.omega_reconstruction, args.omega_images)
+    else:
+        if args.disk_checkpoint is None or args.global_index is None:
+            raise ValueError("DISK localization requires --disk-checkpoint and --global-index")
+        print("[stage1] loading DISK and scene localization cache", file=sys.stderr, flush=True)
+        pnp = DiskPnPLocalizer(
+            environment=args.environment_dir, checkpoint=args.disk_checkpoint, global_index=args.global_index,
+        )
+    anchor_filename = "localization_omega.json" if args.omega_reconstruction else "localization_colmap.json"
+    reference_dirs = [args.environment_dir / "images",
+                      REPO_ROOT / "data/sparse_reconstruction_and_image_data/Friends-monica_apartment/images",
+                      *args.registered_images_dir]
     emit({"type": "ready", "stage": 1})
     try:
         for line in sys.stdin:
@@ -539,37 +577,33 @@ def main() -> None:
                 last = frames_dir / f"{last_index:06d}.jpg"
                 union = masks_dir / "union"
                 with contextlib.redirect_stdout(sys.stderr):
-                    first_pose = pnp.endpoint(
+                    first_pose = pnp.endpoint_for_clip(
                         first, union / f"{first_index:06d}.png",
-                        output_dir / "anchor" / "localization_colmap.json",
+                        output_dir / "anchor" / anchor_filename,
+                        job["video"], first_index, int(metadata["frame_count"]), args.anchor_source, reference_dirs,
                     )
-                    last_pose = pnp.endpoint(
+                    last_pose = pnp.endpoint_for_clip(
                         last, union / f"{last_index:06d}.png",
-                        output_dir / "tail_anchor" / "localization_colmap.json",
+                        output_dir / "tail_anchor" / anchor_filename,
+                        job["video"], last_index, int(metadata["frame_count"]), args.anchor_source, reference_dirs,
                     )
-                emit(
-                    {
-                        "type": "stage1_result",
-                        "status": "ok",
-                        **job,
-                        "frame_count": int(metadata["frame_count"]),
-                        "first_quality": first_pose["quality"],
-                        "last_quality": last_pose["quality"],
-                        "stage1_seconds": round(time.perf_counter() - started, 3),
-                    }
-                )
+                emit(stage_result(job, stage=1, status="ok",
+                        frame_count=int(metadata["frame_count"]),
+                        first_quality=first_pose["quality"],
+                        last_quality=last_pose["quality"],
+                        anchor_source_policy=args.anchor_source,
+                        first_anchor_source=first_pose.get("pose_source", "estimated_disk_pnp"),
+                        last_anchor_source=last_pose.get("pose_source", "estimated_disk_pnp"),
+                        stage1_seconds=round(time.perf_counter() - started, 3),
+                ))
             except Exception as error:
-                shutil.rmtree(output_dir, ignore_errors=True)
-                emit(
-                    {
-                        "type": "stage1_result",
-                        "status": "failed",
-                        **job,
-                        "error": f"{type(error).__name__}: {error}",
-                        "traceback": traceback.format_exc(),
-                        "stage1_seconds": round(time.perf_counter() - started, 3),
-                    }
-                )
+                if not args.keep_failed_output:
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                emit(stage_result(job, stage=1, status="failed",
+                        error=f"{type(error).__name__}: {error}",
+                        traceback=traceback.format_exc(),
+                        stage1_seconds=round(time.perf_counter() - started, 3),
+                ))
     finally:
         pnp.close()
 
