@@ -50,6 +50,12 @@ def main():
                     '--output',str(root/'render'),'--percent','40'],stdout=log,stderr=subprocess.STDOUT)
             if result.returncode:raise RuntimeError(f'{rel}: '+(root/'blender.log').read_text()[-3000:])
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:list(pool.map(render,items))
+        colors_by_actor = {}
+        for root, rel, *_ in items:
+            audit = json.loads((root / 'render' / rel.stem / 'audit.json').read_text())
+            for actor, color in audit['colors'].items():
+                if colors_by_actor.setdefault(actor, color) != color:
+                    raise ValueError(f'Inconsistent color for {actor} in {rel}')
         target=work/'comparison.mp4'
         encoder=subprocess.Popen(['ffmpeg','-v','error','-y','-f','rawvideo','-pix_fmt','bgr24','-s','960x300',
             '-framerate',str(rate),'-i','-','-an','-c:v','libx264','-crf','17','-pix_fmt','yuv420p',

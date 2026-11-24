@@ -134,7 +134,7 @@ def proxy_pose(item: dict, camera: dict, convention: dict, alignment: Matrix):
     return center, basis, scale, height, radius
 
 
-def actor_material(track_id: int, slot: int):
+def actor_material(track_id: int):
     name = f"ClipActorMaterial_{track_id:04d}"
     material = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     import colorsys
@@ -149,7 +149,11 @@ def actor_material(track_id: int, slot: int):
         (0.15, 0.82, 0.76, 1.0),
     ]
     colors.extend([(0.96,.33,.64,1),(.42,.30,.12,1),(.67,.88,.12,1),(.22,.26,.90,1)])
-    material.diffuse_color = colors[slot] if slot<len(colors) else (*colorsys.hsv_to_rgb((slot*.61803398875)%1,.85,.58),1)
+    if 0 <= track_id < len(colors):
+        material.diffuse_color = colors[track_id]
+    else:
+        hue = (track_id * 0.61803398875) % 1.0
+        material.diffuse_color = (*colorsys.hsv_to_rgb(hue, 0.85, 0.58), 1.0)
     material.use_nodes = True
     shader = material.node_tree.nodes.get("Principled BSDF")
     if shader is not None:
@@ -264,14 +268,12 @@ def main() -> None:
     convention = actor_tracks.get("proxy_convention", {})
     proxy_names = []
     skipped_proxy_tracks = []
-    active_ids = sorted(int(t["track_id"]) for t in actor_tracks["tracks"] if t.get("proxy_quality",{}).get("eligible",True))
-    color_slots = {tid:slot for slot,tid in enumerate(active_ids)}
     for track in actor_tracks.get("tracks", []):
         if not track.get("proxy_quality", {}).get("eligible", True):
             skipped_proxy_tracks.append({"track_id": int(track["track_id"]), "quality": track["proxy_quality"]})
             continue
         track_id = int(track["track_id"])
-        color_slot = int(track.get("color_slot", color_slots[track_id]))
+        material = actor_material(track_id)
         root_name = f"ClipActor_{track_id:04d}"
         root = bpy.data.objects.get(root_name) or bpy.data.objects.new(root_name, None)
         link_only(root, actor_collection)
@@ -290,12 +292,12 @@ def main() -> None:
             body = bpy.context.object
             body.name = f"{root_name}_Body"
             body.display_type = "SOLID"
-            body.color = actor_material(track_id,color_slot).diffuse_color
+            body.color = material.diffuse_color
             link_only(body, actor_collection)
             body.parent = root
             body.location = (0.0, 0.0, -head_radius if head_style else 0.0)
             body.rotation_euler = (0.0, 0.0, 0.0)
-            body.data.materials.append(actor_material(track_id,color_slot))
+            body.data.materials.append(material)
             if head_style:
                 bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=12, radius=head_radius)
                 head = bpy.context.object
@@ -303,7 +305,7 @@ def main() -> None:
                 link_only(head, actor_collection)
                 head.parent = root
                 head.location = (0, 0, 0.5 * proxy_height - head_radius)
-                head.data.materials.append(actor_material(track_id,color_slot))
+                head.data.materials.append(material)
                 for polygon in head.data.polygons:
                     polygon.use_smooth = True
                 # A shallow cream band follows the sphere's FRONT (+local X).
@@ -350,7 +352,7 @@ def main() -> None:
             link_only(body, actor_collection)
             body.parent = root
             body.location = (0.0, 0.0, 0.85)
-            body.data.materials.append(actor_material(track_id,color_slot))
+            body.data.materials.append(material)
 
             bpy.ops.mesh.primitive_cone_add(vertices=16, radius1=0.12, radius2=0.0, depth=0.55)
             arrow = bpy.context.object
@@ -359,7 +361,7 @@ def main() -> None:
             arrow.parent = root
             arrow.location = (0.28, 0.0, 1.30)
             arrow.rotation_euler[1] = math.pi / 2.0
-            arrow.data.materials.append(actor_material(track_id,color_slot))
+            arrow.data.materials.append(material)
 
         previous_orientation = None
         previous_head = None
