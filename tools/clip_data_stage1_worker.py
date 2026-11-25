@@ -12,7 +12,7 @@ import sys
 import time
 import traceback
 from batch_protocol import stage_result
-from registered_anchors import registered_anchor
+from registered_anchors import registered_anchor, rotation_zoom_anchor
 from collections import defaultdict
 from pathlib import Path
 
@@ -414,8 +414,28 @@ class DiskPnPLocalizer:
                 output.parent.mkdir(parents=True, exist_ok=True)
                 output.write_text(json.dumps(pose, indent=2) + "\n")
                 return pose
-        pose = self.endpoint(image_path, mask_path, output)
-        pose["pose_source"] = "estimated_disk_pnp"
+        try:
+            pose = self.endpoint(image_path, mask_path, output)
+            pose["pose_source"] = "estimated_disk_pnp"
+        except RuntimeError:
+            if anchor_source != "registered-first" or frame_count < 2:
+                raise
+            other = frame_count-1-frame_index
+            start = image_path.with_name(f"{other:06d}.jpg")
+            reference, _ = registered_anchor(video,other,frame_count,start,self.cameras,
+                                              self.images_by_stem,self.points3d,reference_dirs)
+            if reference is None:
+                raise
+            step = 1 if frame_index>other else -1
+            paths = [image_path.with_name(f"{i:06d}.jpg") for i in range(other,frame_index+step,step)]
+            image = self.images_by_stem[Path(reference["registration"]["image_name"]).stem]
+            pose = rotation_zoom_anchor(reference,image,self.points3d,paths,mask_path.parent)
+            if pose is None:
+                raise
+            pose["quality"] = assess_pose_quality(pose)
+            if not pose["quality"]["dataset_eligible"]:
+                raise
+            output.parent.mkdir(parents=True,exist_ok=True)
         pose["requested_anchor_source"] = anchor_source
         if reason is not None:
             pose["registered_lookup_fallback"] = reason
@@ -503,6 +523,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam3-dilate-pixels", type=int, default=12)
     parser.add_argument("--omega-reconstruction", type=Path)
     parser.add_argument("--omega-images", type=Path)
+    parser.add_argument("--omega-feature-index", type=Path)
     parser.add_argument("--disk-checkpoint", type=Path)
     parser.add_argument("--global-index", type=Path)
     parser.add_argument("--jpeg-quality", type=int, default=95)
@@ -530,7 +551,10 @@ def main() -> None:
         if args.anchor_source != "estimated" or args.omega_images is None:
             raise ValueError("Omega endpoints require --anchor-source estimated and --omega-images")
         print("[stage1] preparing Omega static references", file=sys.stderr, flush=True)
-        pnp = OmegaPnPLocalizer(args.omega_reconstruction, args.omega_images)
+        pnp = OmegaPnPLocalizer(
+            args.omega_reconstruction, args.omega_images,
+            disk_checkpoint=args.disk_checkpoint if args.omega_feature_index else None,
+            feature_index=args.omega_feature_index)
     else:
         if args.disk_checkpoint is None or args.global_index is None:
             raise ValueError("DISK localization requires --disk-checkpoint and --global-index")

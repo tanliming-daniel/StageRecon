@@ -10,6 +10,16 @@ except ModuleNotFoundError:
 
 
 class CameraQualityTests(unittest.TestCase):
+    def test_flow_anchor_requires_distributed_heldout_support(self):
+        pose = self.pose()
+        pose.update(pose_source="registered_static_flow_rotation_zoom",
+                    inlier_source_images={"tail.jpg":60},
+                    flow_validation=dict(reference="tail.jpg", test_count=20,
+                                         median_at_768=1, p90_at_768=2.5, test_area=.15))
+        self.assertTrue(assess_pose_quality(pose)["dataset_eligible"])
+        pose["flow_validation"]["test_area"] = .01
+        self.assertFalse(assess_pose_quality(pose)["dataset_eligible"])
+
     def pose(self, count=60):
         return {'pnp': {'inlier_count': count, 'inlier_rmse_pixels': 2.0}}
 
@@ -30,6 +40,28 @@ class CameraQualityTests(unittest.TestCase):
         pose = self.pose(100)
         pose['pnp']['inlier_spatial_support'] = {'hull_fraction': .02}
         self.assertEqual(assess_pose_quality(pose)['status'], 'review')
+        with self.assertRaises(ValueError):
+            require_usable_anchor(pose)
+
+    def test_omega_endpoint_uses_normalized_heldout_validation(self):
+        pose = self.pose(35)
+        pose.update(pose_source="estimated_omega_ba_disk_pnp", coordinate_system="omega_ba_world")
+        pose["pnp"]["inlier_rmse_pixels"] = 5.2
+        pose["quality"] = {
+            "passed": True, "inlier_count": 35, "test_count": 12,
+            "test_median_pixels_at_768": 2.0,
+            "test_fraction_within_4_pixels_at_768": .8,
+            "static_feature_area_fraction": .10, "inlier_rmse_at_768": 3.1,
+            "reference_inliers": {"a": 20, "b": 15},
+        }
+        self.assertEqual(require_usable_anchor(pose)["status"], "accepted")
+        pose["quality"]["test_fraction_within_4_pixels_at_768"] = .2
+        with self.assertRaises(ValueError):
+            require_usable_anchor(pose)
+
+    def test_missing_omega_validation_is_rejected(self):
+        pose = self.pose(100)
+        pose.update(pose_source="estimated_omega_ba_sift_pnp", coordinate_system="omega_ba_world")
         with self.assertRaises(ValueError):
             require_usable_anchor(pose)
 

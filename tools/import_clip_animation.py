@@ -13,6 +13,50 @@ import bpy
 from mathutils import Matrix, Vector
 
 
+def keyframe_near_architecture(scene, camera, scene_hash):
+    # The TV-wall assembly in this scene also contains an unnamed mesh.
+    aliases = {"geometry_0.022"} if scene_hash == "366923a76853bd956b0db8ed5e829245c6c998750b600834345d569ae135a457" else set()
+    candidates = [obj for obj in bpy.context.visible_objects if obj.type == "MESH"
+                  and not obj.hide_render and not obj.animation_data
+                  and (obj.name in aliases or any(token in obj.name.lower() for token in ("wall","door")))]
+    hidden = {}
+    for frame in range(scene.frame_start,scene.frame_end+1):
+        scene.frame_set(frame)
+        deps = bpy.context.evaluated_depsgraph_get()
+        cam = camera.evaluated_get(deps)
+        origin = cam.matrix_world.translation
+        corners = cam.data.view_frame(scene=scene)
+        directions = []
+        for u in (.15,.5,.85):
+            for v in (.15,.5,.85):
+                local = corners[0].lerp(corners[1],u).lerp(corners[3].lerp(corners[2],u),v)
+                directions.append(cam.matrix_world.to_quaternion() @ local.normalized())
+        for obj in candidates:
+            mesh = obj.evaluated_get(deps)
+            inverse = mesh.matrix_world.inverted_safe()
+            start = inverse @ origin
+            hits = 0
+            for ray in directions:
+                segment = inverse.to_3x3() @ (.5 * ray)
+                hit, *_ = mesh.ray_cast(start,segment.normalized(),distance=segment.length)
+                hits += int(hit)
+            if hits >= 5:
+                hidden.setdefault(obj.name,[]).append(frame)
+    for name, frames in hidden.items():
+        obj = scene.objects[name]
+        active = set(frames)
+        previous = None
+        for frame in range(scene.frame_start,scene.frame_end+1):
+            hide = frame in active
+            if hide != previous:
+                for prop in ("hide_render","hide_viewport"):
+                    setattr(obj,prop,hide)
+                    obj.keyframe_insert(data_path=prop,frame=frame)
+                previous = hide
+    scene.frame_set(scene.frame_start)
+    return hidden
+
+
 def parse_args() -> argparse.Namespace:
     argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser(description=__doc__)
@@ -182,6 +226,17 @@ def main() -> None:
         if pointcloud.get("coordinate_system") != "omega_ba_world":
             raise ValueError("Omega tracks require the Omega-aligned base Blender scene")
     alignment = pointcloud.matrix_world.copy()
+    frame = camera_track.get("scene_frame", {})
+    if camera_track.get("coordinate_system", "").startswith("raw_colmap_world") and frame.get("coordinate_system") == "raw_colmap_world":
+        if not actor_tracks.get("coordinate_system", "").startswith("raw_colmap_world"):
+            raise ValueError("COLMAP cameras require COLMAP actor coordinates")
+        alignment = Matrix(frame["world_to_blender"])
+        scales = [alignment.to_3x3().col[i].length for i in range(3)]
+        scale = sum(scales) / 3.0
+        if scale <= 0 or alignment.to_3x3().determinant() <= 0:
+            raise ValueError("COLMAP alignment must preserve orientation and have positive scale")
+        if max(abs(value-scale) for value in scales) > 1e-5*scale:
+            raise ValueError("COLMAP alignment must have uniform scale")
 
     remove_generated_animation(args.camera_name)
     # Authoring copies of the apartment have visible set pieces disabled for render.
@@ -447,11 +502,13 @@ def main() -> None:
     scene["clip_actor_tracks"] = str(args.actor_tracks.resolve())
     scene.frame_set(1)
 
+    cutaways = keyframe_near_architecture(scene,camera,frame_config.get("source_blend_sha256"))
     output = args.output_blend.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     if not args.no_save_blend:
         bpy.ops.wm.save_as_mainfile(filepath=str(output))
     metadata = {
+        "near_camera_cutaways": cutaways,
         "output_blend": None if args.no_save_blend else str(output),
         "camera": camera.name,
         "fixed_pixel_aspect_fx_fy": aspect,

@@ -13,40 +13,82 @@ FOCAL_MULTIPLIERS = (.65, .85, 1.10, 1.40, 1.80, 2.35, 3.05, 4.0, 5.3, 7.0)
 
 
 class OmegaPnPLocalizer:
-    def __init__(self, reconstruction, images):
+    def __init__(self, reconstruction, images, disk_checkpoint=None, feature_index=None):
         self.reconstruction = Path(reconstruction).resolve()
         self.sift = cv2.SIFT_create(nfeatures=1400)
         self.matcher = cv2.BFMatcher(cv2.NORM_L2)
         self.reference_images = Path(images)
         self.flow_reference_cache = {}
         self.references = []
+        self.reference_sets = {}
+        self.disk = None
+        self.feature_backend = "sift"
+        self.frame_correspondences = {}
+        if disk_checkpoint is not None:
+            import torch
+            from disk import DISK
+            state = torch.load(str(disk_checkpoint), map_location="cpu")
+            self.disk = DISK(window=8, desc_dim=128)
+            self.disk.load_state_dict(state["extractor"] if "extractor" in state else state["disk"])
+            self.disk = self.disk.float().cuda().eval()
+
         cv2.setNumThreads(4)
+        if feature_index is not None:
+            if disk_checkpoint is None:
+                raise ValueError("A DISK checkpoint is required to query the Omega feature index")
+            from omega_feature_index import load_index, signature
+            self.reference_sets, self.index_metadata = load_index(
+                feature_index, signature(self.reconstruction, images, disk_checkpoint))
+            self.references = self.reference_sets["sift"]
+            return
         with np.load(self.reconstruction / "predictions.npz", allow_pickle=False) as data:
             for name, depth, valid, k, extrinsic in zip(
                 data["names"], data["depth"], data["static_mask"], data["intrinsics"], data["extrinsics"]
             ):
-                image = cv2.imread(str(images / str(name)), cv2.IMREAD_GRAYSCALE)
+                image = cv2.imread(str(images / str(name)), cv2.IMREAD_COLOR)
                 if image is None:
                     raise FileNotFoundError(images / str(name))
                 height, width = depth.shape
                 static = cv2.resize(valid.astype(np.uint8)*255, (WIDTH, HEIGHT), interpolation=cv2.INTER_NEAREST)
-                pixels, descriptors = self.features(image, static)
-                scale = np.array([width / WIDTH, height / HEIGHT])
-                native = (pixels + .5) * scale - .5
-                x, y = np.clip(np.rint(native).astype(int), 0, [width-1, height-1]).T
-                z = depth[y, x]
-                keep = valid[y, x] & np.isfinite(z) & (z > 0)
-                if descriptors is None or keep.sum() < 16:
-                    continue
-                rays = np.column_stack((native[keep], np.ones(keep.sum()))) @ np.linalg.inv(k).T
-                xyz = (rays * z[keep, None] - extrinsic[:, 3]) @ extrinsic[:, :3]
-                self.references.append((str(name), pixels[keep], descriptors[keep], xyz))
+                for backend in ("sift", "disk") if self.disk is not None else ("sift",):
+                    self.feature_backend = backend
+                    pixels, descriptors = self.features(image, static)
+                    if descriptors is None or len(pixels) == 0:
+                        continue
+                    scale = np.array([width / WIDTH, height / HEIGHT])
+                    native = (pixels + .5) * scale - .5
+                    x, y = np.clip(np.rint(native).astype(int), 0, [width-1, height-1]).T
+                    z = depth[y, x]
+                    keep = valid[y, x] & np.isfinite(z) & (z > 0)
+                    if keep.sum() < 16:
+                        continue
+                    rays = np.column_stack((native[keep], np.ones(keep.sum()))) @ np.linalg.inv(k).T
+                    xyz = (rays * z[keep, None] - extrinsic[:, 3]) @ extrinsic[:, :3]
+                    self.reference_sets.setdefault(backend, []).append(
+                        (str(name), pixels[keep], descriptors[keep], xyz))
+        self.feature_backend = "sift"
+        self.references = self.reference_sets.get("sift", [])
         if len(self.references) < 2:
             raise ValueError("Omega scene has fewer than two usable static references")
 
     def features(self, gray, static):
         gray = cv2.resize(gray, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
         static = cv2.erode(static, np.ones((5, 5), np.uint8))
+        if self.feature_backend == "disk":
+            import torch
+            rgb = cv2.cvtColor(gray, cv2.COLOR_BGR2RGB) if gray.ndim == 3 else np.repeat(gray[..., None], 3, axis=2)
+            bitmap = torch.from_numpy(rgb.transpose(2, 0, 1).copy()).float()[None].cuda() / 255.0
+            with torch.inference_mode(), torch.autocast(device_type="cuda", enabled=False):
+                feature = self.disk.features(bitmap, kind="nms", window_size=5, cutoff=0.0, n=4096).flat[0]
+            points = feature.kp.detach().float().cpu().numpy()
+            descriptors = feature.desc.detach().float().cpu().numpy()
+            xy = np.rint(points).astype(int)
+            inside = (xy[:, 0] >= 0) & (xy[:, 0] < WIDTH) & (xy[:, 1] >= 0) & (xy[:, 1] < HEIGHT)
+            ids = np.flatnonzero(inside)
+            ids = ids[static[xy[ids, 1], xy[ids, 0]] > 0]
+            return points[ids].astype(np.float32), descriptors[ids].astype(np.float32)
+        if gray.ndim == 3:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
         points, features = self.sift.detectAndCompute(gray, static)
         return np.asarray([p.pt for p in points], np.float32).reshape(-1, 2), features
 
@@ -54,13 +96,13 @@ class OmegaPnPLocalizer:
         candidates = []
         for name, ref_xy, ref_desc, xyz in self.references:
             pairs = [(a.queryIdx, a.trainIdx) for a, b in self.matcher.knnMatch(descriptors, ref_desc, k=2)
-                     if a.distance < .78*b.distance]
+                     if a.distance < (.85 if self.feature_backend == "disk" else .78)*b.distance]
             if len(pairs) >= 16:
                 candidates.append((len(pairs), name, ref_xy, ref_desc, xyz, pairs))
         observations = []
         for _, name, ref_xy, ref_desc, xyz, pairs in sorted(candidates, key=lambda item: -item[0])[:24]:
             reverse = {a.queryIdx: a.trainIdx for a, b in self.matcher.knnMatch(ref_desc, descriptors, k=2)
-                       if a.distance < .78*b.distance}
+                       if a.distance < (.85 if self.feature_backend == "disk" else .78)*b.distance}
             mutual = [(q, r) for q, r in pairs if reverse.get(r) == q]
             if len(mutual) < 16:
                 continue
@@ -78,6 +120,7 @@ class OmegaPnPLocalizer:
 
     @staticmethod
     def solve(xyz, pixels, references):
+        cv2.setRNGSeed(52)
         ids = np.random.default_rng(52).permutation(len(pixels))
         fit, test = np.split(ids, [int(.70*len(ids))])
         best = None
@@ -189,18 +232,21 @@ class OmegaPnPLocalizer:
             result=self.solve(points,uv[idx].astype(float),np.repeat(name,len(idx)))
             if result is not None and result[3]["inlier_count"]>=60 and result[3]["static_feature_area_fraction"]>=.04:
                 result[3]["recovery"]="omega_reference_bidirectional_patch_tracks"
+                self.frame_correspondences[frame_index] = (points, uv[idx].astype(float), np.repeat(name, len(idx)))
                 return result
         return None
 
     def endpoint_for_clip(self, image_path, mask_path, output, video, frame_index,
                           frame_count, anchor_source, reference_dirs):
+        self.frame_correspondences.clear()
         image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         if image is None or mask is None:
             raise FileNotFoundError(f"Missing endpoint image or SAM3 mask: {image_path}, {mask_path}")
         h, w = image.shape
         static = (cv2.resize(mask, (WIDTH, HEIGHT), interpolation=cv2.INTER_NEAREST) == 0).astype(np.uint8)*255
-        pixels, descriptors = self.features(image, static)
+        feature_image = cv2.imread(str(image_path), cv2.IMREAD_COLOR) if self.feature_backend == "disk" else image
+        pixels, descriptors = self.features(feature_image, static)
         choices = [] if descriptors is None or len(pixels) < 30 else self.match(pixels, descriptors)
         attempted = []
         for count in (8, 16, 4, len(choices)):
@@ -218,23 +264,35 @@ class OmegaPnPLocalizer:
                 continue
             result = self.solve(np.asarray(xyz), np.asarray(uv, np.float64), np.asarray(references))
             if result is not None:
+                self.frame_correspondences[frame_index] = (np.asarray(xyz), np.asarray(uv, np.float64), np.asarray(references))
                 break
         else:
             result = self.flow_recovery(image, static, choices, video, frame_index)
+            if result is None and self.feature_backend == "sift" and self.disk is not None:
+                self.feature_backend = "disk"
+                self.references = self.reference_sets.get("disk", [])
+                try:
+                    return self.endpoint_for_clip(image_path, mask_path, output, video, frame_index,
+                                                  frame_count, anchor_source, reference_dirs)
+                finally:
+                    self.feature_backend = "sift"
+                    self.references = self.reference_sets["sift"]
             if result is None:
                 raise RuntimeError(f"Omega PnP failed static validation for {Path(video).name} frame {frame_index}: {attempted} matches")
         rotation, translation, k, quality = result
+        quality["feature_backend"] = self.feature_backend
         scale = np.array([w/WIDTH, h/HEIGHT])
         k[:2, 2] = (k[:2, 2]+.5)*scale-.5
         k[0, 0] *= scale[0]
         k[1, 1] *= scale[1]
         payload = {
-            "image": str(image_path), "coordinate_system": OMEGA_WORLD,
-            "pose_source": "estimated_omega_ba_sift_pnp", "requested_anchor_source": "estimated",
+            "image": str(image_path), "frame_index": frame_index, "coordinate_system": OMEGA_WORLD,
+            "pose_source": "estimated_omega_ba_" + self.feature_backend + "_pnp", "requested_anchor_source": "estimated",
             "quality": quality,
             "world_to_camera_rotation": rotation.tolist(), "world_to_camera_translation": translation.tolist(),
             "camera_center": (-rotation.T @ translation).tolist(),
-            "pnp": {"intrinsics": k.tolist(), "focal": float(k[0,0]), "inlier_count": quality["inlier_count"],
+            "inlier_source_images": quality["reference_inliers"],
+            "pnp": {"inlier_spatial_support": {"hull_fraction": quality["static_feature_area_fraction"]}, "intrinsics": k.tolist(), "focal": float(k[0,0]), "inlier_count": quality["inlier_count"],
                     "inlier_rmse_pixels": quality["inlier_rmse_at_768"]*float(np.mean(scale))},
         }
         output.parent.mkdir(parents=True, exist_ok=True)

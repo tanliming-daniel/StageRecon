@@ -115,3 +115,118 @@ def registered_anchor(video, frame_index, frame_count, query_path, cameras,
         return pose, None
     except (ValueError, KeyError, OSError, cv2.error) as error:
         return None, f'{type(error).__name__}: {error}'
+
+
+def rotation_zoom_anchor(reference, image, points, frames, mask_dir):
+    """Track registered static landmarks through a shot and test a tripod pan/zoom."""
+
+    def gray(path):
+        value = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if value is None:
+            raise FileNotFoundError(path)
+        return value
+
+    prev = gray(frames[0])
+    h, w = prev.shape
+    source_size = reference["registration"]["original_resolution"]
+    known = image.point3D_ids >= 0
+    xy = (image.xys[known] * (np.array([w,h]) / source_size)).astype(np.float32)
+    xyz = np.array([points[k].xyz for k in image.point3D_ids[known]])
+
+    def static(frame, pixels):
+        mask = gray(mask_dir / frame.with_suffix(".png").name)
+        if mask.shape != (h,w):
+            raise ValueError("Unexpected mask resolution")
+        x,y = np.rint(pixels).astype(int).T
+        return ((x>=0) & (x<w) & (y>=0) & (y<h)
+                & (mask[y.clip(0,h-1), x.clip(0,w-1)]==0))
+
+    # Independently test the pure-rotation image warp outside the map points.
+    # These background corners have rays but no depth and never enter the fit.
+    k = np.asarray(reference["pnp"]["intrinsics"])
+    base = np.asarray(reference["world_to_camera_rotation"])
+    center = np.asarray(reference["camera_center"])
+    allowed = (gray(mask_dir / frames[0].with_suffix(".png").name)==0).astype(np.uint8)
+    for pt in np.rint(xy).astype(int):
+        cv2.circle(allowed,tuple(pt),8,0,-1)
+    corners = cv2.goodFeaturesToTrack(prev,800,.005,12,mask=allowed)
+    mapped = np.ones(len(xy), dtype=bool)
+    if corners is not None:
+        extra = corners.reshape(-1,2)
+        rays = np.column_stack((extra,np.ones(len(extra)))) @ np.linalg.inv(k).T
+        xyz = np.vstack((xyz,center + rays @ base))
+        xy = np.vstack((xy,extra))
+        mapped = np.r_[mapped,np.zeros(len(extra),dtype=bool)]
+    keep = static(frames[0], xy)
+    xy, xyz, mapped = xy[keep], xyz[keep], mapped[keep]
+    for frame in frames[1:]:
+        if len(xy) < 55:
+            return None
+        nxt = gray(frame)
+        tracked, ok, _ = cv2.calcOpticalFlowPyrLK(prev,nxt,xy,None)
+        back, reverse_ok, _ = cv2.calcOpticalFlowPyrLK(nxt,prev,tracked,None)
+        keep = (ok.ravel().astype(bool) & reverse_ok.ravel().astype(bool)
+                & (np.linalg.norm(back-xy,axis=1)<.7) & static(frame,tracked))
+        xy, xyz, mapped, prev = tracked[keep], xyz[keep], mapped[keep], nxt
+    if len(xy) < 55:
+        return None
+    center = np.asarray(reference["camera_center"])
+    base = np.asarray(reference["world_to_camera_rotation"])
+    k = np.asarray(reference["pnp"]["intrinsics"])
+    if mapped.sum()<55:
+        return None
+    train,test = np.split(np.random.default_rng(52).permutation(np.flatnonzero(mapped)), [int(.7*mapped.sum())])
+
+    def errors(v, idx):
+        r = cv2.Rodrigues(v[:3])[0] @ base
+        cam = (xyz[idx]-center) @ r.T
+        pixels = cam[:,:2] / np.maximum(cam[:,2:3],1.e-8) * k.diagonal()[:2]*np.exp(v[3]) + k[:2,2]
+        return (pixels-xy[idx]).ravel()
+
+    # Four parameters, with soft-L1 weights in pixel space. Use OpenCV and
+    # NumPy since the SAM3 worker does not depend on SciPy.
+    v = np.zeros(4)
+    steps = np.eye(4)*1.e-6
+    for iteration in range(30):
+        residual = errors(v,train)
+        jac = np.column_stack([(errors(v+step,train)-residual)/1.e-6 for step in steps])
+        weights = (1+(residual/2.)**2)**(-.25)
+        delta, _, rank, _ = np.linalg.lstsq(jac*weights[:,None], -residual*weights, rcond=None)
+        if rank != 4 or not np.isfinite(delta).all():
+            return None
+        v += delta
+        if abs(v[3])>=np.log(3.) or np.linalg.norm(v[:3])>np.pi:
+            return None
+        if np.linalg.norm(delta)<1.e-7:
+            break
+    else:
+        return None
+    held = np.linalg.norm(errors(v,test).reshape(-1,2),axis=1)*768/w
+    residuals = np.linalg.norm(errors(v,np.arange(len(xy))).reshape(-1,2),axis=1)
+    inliers = (residuals<=4) & mapped
+    warp_test = np.flatnonzero(~mapped)
+    if len(warp_test)<16:
+        return None
+    warp_errors = residuals[warp_test]*768/w
+    if np.quantile(warp_errors,.9)>4:
+        return None
+    supported = warp_test[warp_errors<=4]
+    area = cv2.contourArea(cv2.convexHull(xy[supported]))/(w*h)
+    if np.median(held)>2 or np.quantile(held,.9)>4 or area<.05 or sum(inliers)<40:
+        return None
+    r = cv2.Rodrigues(v[:3])[0] @ base
+    k = k.copy()
+    k[0,0] *= np.exp(v[3])
+    k[1,1] *= np.exp(v[3])
+    source = reference["registration"]["image_name"]
+    return dict(query_image=str(frames[-1]), coordinate_system=reference["coordinate_system"],
+                pose_source="registered_static_flow_rotation_zoom",requested_anchor_source="registered-first",
+                world_to_camera_rotation=r.tolist(), world_to_camera_translation=(-r@center).tolist(),
+                camera_center=center.tolist(), inlier_source_images={source:int(sum(inliers))},
+                flow_validation=dict(reference=source,test_count=len(test),median_at_768=float(np.median(held)),
+                                     p90_at_768=float(np.quantile(held,.9)),test_area=area, warp_test_count=len(warp_test),
+                                     warp_p90_at_768=float(np.quantile(warp_errors,.9))),
+                pnp=dict(intrinsics=k.tolist(),focal=float(k[0,0]),rotation_vector=cv2.Rodrigues(r)[0].ravel().tolist(),
+                         translation=(-r@center).tolist(),inlier_count=int(sum(inliers)),
+                         inlier_rmse_pixels=float(np.sqrt(np.mean(residuals[inliers]**2))),
+                         inlier_spatial_support=dict(hull_fraction=cv2.contourArea(cv2.convexHull(xy[inliers]))/(w*h))))

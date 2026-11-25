@@ -49,10 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest-name", default="batch_manifest.json")
     parser.add_argument("--environment-dir", type=Path, default=DEFAULT_ENVIRONMENT)
     parser.add_argument("--base-blend", type=Path)
-    parser.add_argument("--camera-backend", choices=("omega", "colmap"), default="omega")
+    parser.add_argument("--camera-backend", choices=("omega", "colmap"), default="colmap")
     parser.add_argument("--omega-reconstruction", type=Path, default=DEFAULT_OMEGA)
     parser.add_argument("--omega-scene-config", type=Path, help="Scene profile for this reconstruction; default: its batch_scene.json")
     parser.add_argument("--omega-images", type=Path)
+    parser.add_argument("--experimental-colmap-registration", action="store_true", help="Use the fitted static-point similarity instead of the scene asset alignment")
+    parser.add_argument("--omega-feature-index", type=Path)
     parser.add_argument("--sam3-python", type=Path, default=DEFAULT_SAM3_PYTHON)
     parser.add_argument("--da3-python", type=Path, default=DEFAULT_DA3_PYTHON)
     parser.add_argument("--sam3-root", type=Path, default=DEFAULT_SAM3_ROOT)
@@ -178,48 +180,59 @@ def main() -> None:
     omega_units_per_meter = 1.0
     review_index = None
     reviewed_jobs = []
-    if use_omega:
-        if args.anchor_source not in (None, "estimated"):
-            raise ValueError("Omega requires --anchor-source estimated")
-        args.anchor_source = "estimated"
-        omega = args.omega_reconstruction.resolve()
-        scene_path = (args.omega_scene_config or omega / "batch_scene.json").resolve()
-        scene = read(scene_path)
-        args.omega_images = args.omega_images or (omega / scene["reference_images"] if scene.get("reference_images") else DEFAULT_OMEGA_IMAGES)
-        if scene["coordinate_system"] != "omega_ba_world":
-            raise ValueError("Invalid Omega batch scene coordinate system")
-        args.base_blend = args.base_blend or omega / scene["blend"]
-        args.output_root = args.output_root or DEFAULT_OUTPUT_ROOT.with_name(DEFAULT_OUTPUT_ROOT.name + "_omega_shoulders_p075_" + scene["source_blend_sha256"][:8])
-        omega_pointcloud = omega / scene["pointcloud"]
-        if scene.get("predictions_sha256") and sha256(omega/"predictions.npz")!=scene["predictions_sha256"]:
-            raise ValueError("Omega predictions differ from the registered reconstruction")
-        if sha256(omega_pointcloud)!=scene["pointcloud_sha256"]:
-            raise ValueError("Point cloud differs from the registered Omega scene")
-        if sha256(args.base_blend)!=scene["source_blend_sha256"]:
-            raise ValueError("Base blend differs from the registered Omega scene; prepare a new scene profile")
-        if (args.use_reviewed and scene.get("review_index") and args.actor_world_up is None
-                and args.da3_model.resolve()==DEFAULT_DA3_MODEL.resolve()
-                and args.sam3_checkpoint.resolve()==DEFAULT_SAM3_CHECKPOINT.resolve()
-                and args.omega_images.resolve()==(omega / scene.get("reference_images", args.omega_images)).resolve()):
-            index_path = omega / scene["review_index"]
-            review_index = read(index_path)
-            if (review_index["profile_sha256"]!=scene_signature(scene) or
-                    review_index["scene_sha256"]!=scene["source_blend_sha256"] or
-                    review_index["pointcloud_sha256"]!=scene["pointcloud_sha256"]):
-                raise ValueError("Reviewed bundle index does not match the selected scene")
-        omega_units_per_meter = float(scene["omega_units_per_meter"])
-        if not (0 < omega_units_per_meter < float("inf")):
-            raise ValueError("Invalid Omega scene units per meter")
-        args.actor_world_up = args.actor_world_up or scene["world_up"]
-        for path in (omega_pointcloud, omega / "predictions.npz", args.base_blend):
-            if not path.is_file():
-                raise FileNotFoundError(path)
-        if not args.omega_images.is_dir():
-            raise FileNotFoundError(args.omega_images)
-    else:
-        args.anchor_source = args.anchor_source or "registered-first"
-        args.base_blend = args.base_blend or DEFAULT_BLEND
-        args.output_root = args.output_root or DEFAULT_OUTPUT_ROOT
+    if args.omega_feature_index is not None:
+        if not use_omega:
+            raise ValueError("--omega-feature-index requires the Omega camera backend")
+        if not args.omega_feature_index.is_file():
+            raise FileNotFoundError(args.omega_feature_index)
+        if not args.disk_checkpoint.is_file():
+            raise FileNotFoundError(args.disk_checkpoint)
+    if use_omega and args.anchor_source not in (None, "estimated"):
+        raise ValueError("Omega requires --anchor-source estimated")
+    args.anchor_source = "estimated" if use_omega else args.anchor_source or "registered-first"
+    omega = args.omega_reconstruction.resolve()
+    scene_path = (args.omega_scene_config or omega / "batch_scene.json").resolve()
+    scene = read(scene_path)
+    args.omega_images = args.omega_images or (omega / scene["reference_images"] if scene.get("reference_images") else DEFAULT_OMEGA_IMAGES)
+    if scene["coordinate_system"] != "omega_ba_world":
+        raise ValueError("Invalid Omega batch scene coordinate system")
+    colmap_alignment_path = REPO_ROOT / "configs/scenes/Friends-monica_apartment.json"
+    registration = None
+    if args.experimental_colmap_registration:
+        if use_omega:
+            raise ValueError("Experimental COLMAP registration requires --camera-backend colmap")
+        registration = read(colmap_alignment_path)["registered_omega_alignment"]
+        if (registration["pointcloud_sha256"] != scene["pointcloud_sha256"]
+                or registration["images_sha256"] != sha256(args.environment_dir / "colmap/images.bin")):
+            raise ValueError("COLMAP and Omega models differ from the calibrated scene pair")
+    args.base_blend = args.base_blend or omega / scene["blend"]
+    args.output_root = args.output_root or DEFAULT_OUTPUT_ROOT.with_name(DEFAULT_OUTPUT_ROOT.name + ("_colmap_registered_v2_shoulders_p075_" if registration else f"_{args.camera_backend}_static_camera_shoulders_p075_") + scene["source_blend_sha256"][:8])
+    omega_pointcloud = omega / scene["pointcloud"]
+    if scene.get("predictions_sha256") and sha256(omega/"predictions.npz")!=scene["predictions_sha256"]:
+        raise ValueError("Omega predictions differ from the registered reconstruction")
+    if sha256(omega_pointcloud)!=scene["pointcloud_sha256"]:
+        raise ValueError("Point cloud differs from the registered Omega scene")
+    if sha256(args.base_blend)!=scene["source_blend_sha256"]:
+        raise ValueError("Base blend differs from the registered Omega scene; prepare a new scene profile")
+    if (use_omega and args.use_reviewed and scene.get("review_index") and args.actor_world_up is None
+            and args.da3_model.resolve()==DEFAULT_DA3_MODEL.resolve()
+            and args.sam3_checkpoint.resolve()==DEFAULT_SAM3_CHECKPOINT.resolve()
+            and args.omega_images.resolve()==(omega / scene.get("reference_images", args.omega_images)).resolve()):
+        index_path = omega / scene["review_index"]
+        review_index = read(index_path)
+        if (review_index["profile_sha256"]!=scene_signature(scene) or
+                review_index["scene_sha256"]!=scene["source_blend_sha256"] or
+                review_index["pointcloud_sha256"]!=scene["pointcloud_sha256"]):
+            raise ValueError("Reviewed bundle index does not match the selected scene")
+    omega_units_per_meter = float(scene["omega_units_per_meter"])
+    if not (0 < omega_units_per_meter < float("inf")):
+        raise ValueError("Invalid Omega scene units per meter")
+    args.actor_world_up = args.actor_world_up or scene["world_up"]
+    for path in (omega_pointcloud, omega / "predictions.npz", args.base_blend):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    if not args.omega_images.is_dir():
+        raise FileNotFoundError(args.omega_images)
     args.actor_world_up = resolve_actor_world_up(args.environment_dir, args.base_blend, args.actor_world_up, REPO_ROOT / "configs/scenes")
     clips_root = args.clips_root.resolve()
     output_root = args.output_root.resolve()
@@ -270,9 +283,14 @@ def main() -> None:
         if valid_bundle(output_dir):
             prior = json.loads((output_dir / "render_job.json").read_text())
             prior_omega = prior["coordinate_system"]["camera"] == "omega_ba_world"
-            if prior_omega != use_omega:
+            if not prior_omega:
                 raise ValueError(f"Bundle uses different scene coordinates: {output_dir}; select another --output-root")
-            if use_omega and not args.overwrite:
+            if not args.overwrite:
+                saved_camera = read(output_dir / "camera_track.json")
+                if saved_camera.get("camera_backend", "omega") != args.camera_backend:
+                    raise ValueError(f"Existing bundle uses another camera backend: {output_dir}")
+                if registration and saved_camera.get("colmap_to_omega") != registration["colmap_to_omega"]:
+                    raise ValueError(f"Existing bundle uses another COLMAP alignment: {output_dir}")
                 if prior.get("source_scene", {}).get("sha256") != scene["source_blend_sha256"]:
                     raise ValueError(f"Existing bundle uses a different base scene: {output_dir}")
                 method = json.loads((output_dir / "actor_tracks.json").read_text()).get("animation_method")
@@ -299,6 +317,7 @@ def main() -> None:
                           "anchor_source": args.anchor_source, "camera_backend": args.camera_backend,
                           "base_blend": str(args.base_blend),
                           "stage1_gpu": args.stage1_gpu, "stage2_gpu": args.stage2_gpu,
+                          "omega_feature_index": str(args.omega_feature_index.resolve()) if args.omega_feature_index else None,
                           "actor_world_up": args.actor_world_up, "jobs": pending}, indent=2))
         return
 
@@ -328,6 +347,8 @@ def main() -> None:
             "--sam3-checkpoint", str(args.sam3_checkpoint.resolve()),
             *(["--omega-reconstruction", str(args.omega_reconstruction.resolve()), "--omega-images", str(args.omega_images.resolve())]
               if use_omega else ["--disk-checkpoint", str(args.disk_checkpoint.resolve()), "--global-index", str(args.global_index.resolve())]),
+            *(["--omega-feature-index", str(args.omega_feature_index.resolve()), "--disk-checkpoint", str(args.disk_checkpoint.resolve())]
+              if use_omega and args.omega_feature_index else []),
         ],
         args.stage1_gpu,
         cache_root,
@@ -340,7 +361,9 @@ def main() -> None:
             "--da3-model", str(args.da3_model.resolve()),
             "--da3-device", "cuda:0",
             "--base-blend", str(args.base_blend.resolve()),
-            *(["--omega-scene-config", str(scene_path)] if use_omega else []),
+            "--omega-scene-config", str(scene_path),
+            *(["--experimental-colmap-registration"] if registration else []),
+            *(["--colmap-alignment", str(colmap_alignment_path)] if not use_omega else []),
             *(["--omega-pointcloud", str(omega_pointcloud), "--omega-units-per-meter", str(omega_units_per_meter)]
               if omega_pointcloud else []),
             *(["--actor-world-up", *[format(value, ".17f") for value in args.actor_world_up]] if args.actor_world_up is not None else []),

@@ -73,6 +73,8 @@ def sanitize_portable_bundle(output_dir: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--environment-dir", type=Path, required=True)
+    parser.add_argument("--experimental-colmap-registration", action="store_true")
+    parser.add_argument("--colmap-alignment", type=Path)
     parser.add_argument("--omega-pointcloud", type=Path)
     parser.add_argument("--omega-scene-config", type=Path)
     parser.add_argument("--omega-units-per-meter", type=float, default=1.0)
@@ -112,6 +114,31 @@ def main() -> None:
             camera_path = output_dir / "camera_track.json"
             actor_path = output_dir / "actor_tracks.json"
             try:
+                if args.colmap_alignment:
+                    import numpy as np
+                    scene = json.loads(args.omega_scene_config.read_text())
+                    alignment = json.loads(args.colmap_alignment.read_text())
+                    transform = np.linalg.solve(scene["omega_to_blender"], alignment["world_to_blender"])
+                    registration = alignment.get("registered_omega_alignment", {})
+                    if args.experimental_colmap_registration:
+                        if registration.get("pointcloud_sha256") != scene["pointcloud_sha256"]:
+                            raise ValueError("Alignment belongs to another Omega reconstruction")
+                        transform = np.asarray(registration["colmap_to_omega"])
+                    scale = np.linalg.det(transform[:3, :3]) ** (1 / 3)
+                    rotation = transform[:3, :3] / scale
+                    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5):
+                        raise ValueError("Scene alignments require a proper similarity transform")
+                    for directory in ("anchor", "tail_anchor"):
+                        folder = output_dir / directory
+                        pose = json.loads((folder / "localization_colmap.json").read_text())
+                        old_r = np.asarray(pose["world_to_camera_rotation"])
+                        old_t = np.asarray(pose["world_to_camera_translation"]).reshape(3)
+                        center = transform[:3, :3] @ (-old_r.T @ old_t) + transform[:3, 3]
+                        new_r = old_r @ rotation.T
+                        pose.update(world_to_camera_rotation=new_r.tolist(),
+                                    world_to_camera_translation=(-new_r @ center).tolist(),
+                                    camera_center=center.tolist(), coordinate_system="omega_ba_world")
+                        (folder / anchor_filename).write_text(json.dumps(pose))
                 invoke_main(
                     estimate_clip_camera_da3,
                     [
@@ -149,6 +176,9 @@ def main() -> None:
                 if args.omega_scene_config:
                     scene = json.loads(args.omega_scene_config.read_text())
                     camera = json.loads(camera_path.read_text())
+                    if args.colmap_alignment:
+                        camera["colmap_to_omega"] = transform.tolist()
+                    camera["camera_backend"] = "colmap" if args.colmap_alignment else "omega"
                     camera["scene_frame"] = {
                         "coordinate_system": scene["coordinate_system"],
                         "world_to_blender": scene["omega_to_blender"],

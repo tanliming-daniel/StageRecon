@@ -449,8 +449,31 @@ def main() -> None:
             intrinsics=intrinsics.astype(np.float32),
         )
 
+    from static_clip_camera import background_motion
     da3_c2w = np.linalg.inv(extrinsics)
     relative_c2w = extrinsics[0][None] @ da3_c2w
+    observed_anchors = (anchor, tail_anchor)
+    fixed = None
+    positive_depth = depth[0][np.isfinite(depth[0]) & (depth[0]>0)]
+    relative_shift = np.linalg.norm(relative_c2w[:,:3,3],axis=1).max()
+    max_angle = np.degrees(Rotation.from_matrix(relative_c2w[:,:3,:3]).magnitude()).max()
+    focal_ratio = intrinsics[:,0,0].max()/intrinsics[:,0,0].min()
+    if (positive_depth.size and relative_shift < .008*np.median(positive_depth)
+            and max_angle < .65 and focal_ratio < 1.02):
+        fixed = background_motion(frame_paths,args.mask_dir)
+    if fixed is not None:
+        # Registration has identity and static-landmark reprojection checks.
+        # Prefer this over an independently estimated endpoint when available.
+        def reliability(p):
+            quality=p.get("pnp",{})
+            return (p.get("pose_source")=="registered_colmap",
+                    -quality.get("inlier_rmse_pixels",float("inf")),
+                    quality.get("inlier_count",0))
+        chosen = max(range(2),key=lambda i:reliability(observed_anchors[i]))
+        anchor = tail_anchor = observed_anchors[chosen]
+        fixed.update(method="fixed_background_and_da3",selected_frame=chosen*(len(frame_paths)-1),
+                     da3_max_rotation_degrees=float(max_angle),da3_focal_ratio=float(focal_ratio),
+                     da3_max_shift_relative_to_depth=float(relative_shift/np.median(positive_depth)))
     relative_c2w = smooth_relative_poses(
         relative_c2w,
         args.smoothing_mode,
@@ -515,14 +538,19 @@ def main() -> None:
         predicted_c2w.append(anchor_c2w @ relative)
     predicted_c2w = np.stack(predicted_c2w)
     predicted_focals = anchor_focal * focal_ratios
-    absolute_c2w, absolute_focals, endpoint_correction = (
-        constrain_trajectory_to_tail_anchor(
-            predicted_c2w,
-            predicted_focals,
-            tail_anchor_c2w,
-            tail_anchor_focal,
+    if fixed is not None:
+        absolute_c2w = np.repeat(anchor_c2w[None],len(frame_paths),axis=0)
+        absolute_focals = np.full(len(frame_paths),anchor_focal)
+        endpoint_correction = fixed
+    else:
+        absolute_c2w, absolute_focals, endpoint_correction = (
+            constrain_trajectory_to_tail_anchor(
+                predicted_c2w,
+                predicted_focals,
+                tail_anchor_c2w,
+                tail_anchor_focal,
+            )
         )
-    )
 
     frames = []
     raw_centers = relative_c2w[:, :3, 3]
@@ -559,6 +587,8 @@ def main() -> None:
                 ),
                 "raw_relative_translation_norm": float(np.linalg.norm(raw_centers[index])),
             }
+        if fixed is not None:
+            quality = dict(status="held_static_camera", selected_frame=fixed["selected_frame"])
         frames.append(
             {
                 "frame_index": index,
@@ -603,8 +633,8 @@ def main() -> None:
         "absolute_anchor_policy": anchor.get("requested_anchor_source", "estimated"),
         "absolute_anchor_provenance": [
             {"frame_index": i, "pose_source": p.get("pose_source", "estimated_disk_pnp"),
-             "registration": p.get("registration"), "quality": p.get("quality")}
-            for i, p in ((0, anchor), (len(frame_paths) - 1, tail_anchor))
+             "registration": p.get("registration"), "flow_validation": p.get("flow_validation"), "quality": p.get("quality")}
+            for i, p in ((0, observed_anchors[0]), (len(frame_paths) - 1, observed_anchors[1]))
         ],
         "resolution": {"width": original_width, "height": original_height},
         "camera_center": frames[0]["camera_center"],

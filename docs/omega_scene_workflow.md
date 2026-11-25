@@ -2,6 +2,13 @@
 
 本流程在 H100 的 `/root/userdata/300workspace/StageRecon` 运行。项目的生产入口是 `tools/run_clip_render_data_batch.py`。前两阶段产出相机和人物数据，Blender 单独负责导入、验收和渲染。本文命令在项目根目录执行。
 
+默认相机后端是 COLMAP。首尾优先复用通过图像身份及重投影检查的注册相机，缺少注册时运行 DISK/PnP。当独立定位失败且另一端有注册相机时，可沿静态背景跟踪三维点，用留出点和独立背景特征验证固定中心的转向、变焦。相机通过场景资产对齐转换到 Omega 坐标系后，继续使用 DA3 深度和 SAM 3D Body 肩部、座位与轨迹约束。
+
+当整段 DA3 的相对位移、转角和焦距变化都很小，且逐帧遮罩外背景支持固定机位时，整段共享同一个绝对相机及内参。选择时优先使用已验证的 COLMAP 注册端点。查看 camera_track.json 中的 da3.endpoint_correction 可区分固定机位与双端校正。
+
+Blender 导入时逐帧检查静态墙、门以及当前场景登记的近相机网格。九条视线中至少五条在 0.5 个场景单位内命中同一对象时，导入器在对应帧隐藏该对象，并在离开后恢复。导入元数据 near_camera_cutaways 记录受影响的对象和帧。更新此规则后可直接使用已有数据包重新导入并渲染。更新相机或人物定位则需重新生成数据包。对照视频旁的 visual_qa.json 列出原片有细节而渲染接近纯色的帧。
+
+
 ## 当前发布版本
 
 | 项目 | 当前值 |
@@ -24,10 +31,10 @@ BL=/root/userdata/300workspace/blender-5.1.1-linux-x64/blender
 BASE=data/scene_with_clip_animation_366923a7.blend
 CLIPS=data/clips/Friends_S08_PublicHD_OmniShotCut_v1_5
 CASES=configs/scenes/Friends-monica_apartment.review24.json
-OUT=outputs/Friends-monica_apartment/clip_render_data_s08_omega_shoulders_p075_366923a7
+OUT=outputs/Friends-monica_apartment/clip_render_data_s08_colmap_static_camera_shoulders_p075_366923a7
 
-"$PY" tools/run_clip_render_data_batch.py --clips-root "$CLIPS" --case-list "$CASES" --output-root "$OUT"
-CUDA_VISIBLE_DEVICES=4 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 LP_NUM_THREADS=3 \
+"$PY" tools/run_clip_render_data_batch.py --camera-backend colmap --stage1-gpu 0 --stage2-gpu 3 --no-use-reviewed --clips-root "$CLIPS" --case-list "$CASES" --output-root "$OUT"
+CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 LP_NUM_THREADS=3 \
   "$PY" tools/render_omega_comparison.py --clips-root "$CLIPS" --case-list "$CASES" \
   --bundles "$OUT" --base-blend "$BASE" --blender "$BL" --jobs 4 \
   --output outputs/Friends-monica_apartment/GT_Blender_24.mp4
@@ -51,6 +58,25 @@ CUDA_VISIBLE_DEVICES=4 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=2 LP_NUM_THREADS=3
 人物实例分数门槛为 **≥ 0.75**。角色确认后在整个 clip 内保留；双肩支持位置，头部旋转驱动眼线。Blender 按数值 track_id 固定配色，过滤角色、切换镜头或导入带旧 color_slot 的审定包均使用相同映射。ID 0–9 依次为红、天蓝、绿、金黄、紫、青绿、粉、棕、黄绿、靛蓝，其他 ID 按数值计算色相。track_id 是镜头内的跟踪编号，同色不代表跨镜头是同一位演员。新推理只对可靠双肩覆盖充分、人体深度与代理投影宽度都明显异常的轨迹重新估深，再利用配置中可见的静态网格射线交点限制躯干深度。GPU 4 的共享显存不足时，失败会写入 manifest，可在资源释放后用相同命令重试。
 
 第 19 段的右下角相框是人工核实的图像区域。配置中的 `reviewed_image_regions` 绑定视频摘要；矩形坐标为原始图像的归一化 `[左, 上, 右, 下]`。只有同一轨迹的全部观测框都落在区域内才排除。其他镜头里的电视、照片需要独立证据；不要复制这段的屏幕坐标或角色 ID。
+
+## Omega 特征定位索引
+
+索引保存每张参考图的静态特征像素、描述子和 Omega 世界三维位置。三维位置由已优化的参考相机和深度回投获得。SIFT 为第一轮匹配，失败后尝试 DISK。两种方法都要经过双向匹配、图像对几何检查和 PnP 留出点验证。特征增多本身不能作为相机通过的依据。
+
+    INDEX=outputs/Friends-monica_apartment/omega_feature_index_v1/features.npz
+    CUDA_VISIBLE_DEVICES=0 OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=1 \
+      /root/userdata/300workspace/sm3r/bin/python tools/build_omega_feature_index.py \
+      --reconstruction /root/userdata/300workspace/merg3r_work/omega_20261119_reviewed172_ba_regularized \
+      --images data/sparse_reconstruction_and_image_data/Friends-monica_apartment/images \
+      --checkpoint outputs/Friends-monica_apartment/new_image_localization/models/depth-save.pth \
+      --output "$INDEX"
+
+    /root/userdata/300workspace/da3/bin/python tools/run_clip_render_data_batch.py \
+      --camera-backend omega --omega-feature-index "$INDEX" --stage1-gpu 0 --stage2-gpu 3
+
+索引按输入重建、参考图字节摘要、DISK 权重和提取设置签名校验，源数据变更后需以新索引路径重新构建。写入采用临时文件和原子替换。构建器在已有索引签名一致时直接复用。当前人物掩码来自参考重建的 static_mask，临时物品还需要额外的多视角一致性验证。
+
+相机两阶段统一采用 768 像素尺度下的留出点误差、内点比例和覆盖率，避免按原图像素误差和另一套内点数重复判定。可用 tools/evaluate_omega_feature_index.py --help 运行同 mask 下的 SIFT 与索引定位对照。测试中的相机验收结果独立于已发布的审定包。
 
 ## 更新同一场景
 

@@ -56,6 +56,7 @@ def main():
             for actor, color in audit['colors'].items():
                 if colors_by_actor.setdefault(actor, color) != color:
                     raise ValueError(f'Inconsistent color for {actor} in {rel}')
+        low_detail = []
         target=work/'comparison.mp4'
         encoder=subprocess.Popen(['ffmpeg','-v','error','-y','-f','rawvideo','-pix_fmt','bgr24','-s','960x300',
             '-framerate',str(rate),'-i','-','-an','-c:v','libx264','-crf','17','-pix_fmt','yuv420p',
@@ -71,6 +72,14 @@ def main():
                         panel=np.zeros((300,960,3),np.uint8);panel[30:,:480]=np.frombuffer(raw,np.uint8).reshape(270,480,3)
                         frame=cv2.imread(str(root/'render'/rel.stem/f'frame_{j:04d}.png'))
                         panel[30:,480:]=cv2.resize(frame,(480,270),interpolation=cv2.INTER_AREA)
+                        # Flag a blank viewport against a textured source frame. Report it
+                        # separately from object existence and per-frame transform checks.
+                        source_gray = cv2.cvtColor(panel[30:,:480], cv2.COLOR_BGR2GRAY)
+                        render_gray = cv2.cvtColor(panel[30:,480:], cv2.COLOR_BGR2GRAY)
+                        if (np.percentile(render_gray, 99) - np.percentile(render_gray, 1) < 8
+                                and np.percentile(source_gray, 95) - np.percentile(source_gray, 5) > 40):
+                            low_detail.append({"clip": str(rel), "frame": j})
+
                         for x,label in [(8,f'{i:02d}/{len(items)}  {rel.parts[0]}  {rel.stem.split("_")[1] if "_" in rel.stem else rel.stem}  |  GT'),(488,f'Blender  |  {j}/{count}')]:
                             cv2.putText(panel,label,(x,21),0,.54,(238,238,238),1,cv2.LINE_AA)
                         encoder.stdin.write(panel.tobytes())
@@ -86,6 +95,7 @@ def main():
             '-show_entries','stream=nb_read_frames','-of','csv=p=0',str(target)]))
         if actual!=expected:raise ValueError(f'Encoded {actual} frames; expected {expected}')
         os.replace(target,args.output)
+        args.output.with_suffix(".visual_qa.json").write_text(json.dumps({"frame_count": actual, "low_detail_frames": low_detail}, indent=2))
         print(f'{args.output}: {len(items)} clips, {expected} frames')
 
 

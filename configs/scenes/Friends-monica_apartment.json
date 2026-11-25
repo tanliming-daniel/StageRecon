@@ -2,6 +2,66 @@
   "schema_version": 1,
   "base_blend_filename": "scene_with_clip_animation.blend",
   "alignment_object": "pointcloud",
-  "raw_world_up": [0.0, -0.9961947202682495, -0.0871557667851448],
-  "source": "Inverse rotation of the current Blender alignment object applied to scene +Z; renderer vertical, not an independently recovered floor plane."
+  "raw_world_up": [
+    0.0,
+    -0.9961947202682495,
+    -0.0871557667851448
+  ],
+  "source": "Inverse rotation of the current Blender alignment object applied to scene +Z; renderer vertical, not an independently recovered floor plane.",
+  "world_to_blender": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      -0.0871557668,
+      0.9961947203,
+      0
+    ],
+    [
+      0,
+      -0.9961947203,
+      -0.0871557668,
+      0.9199999571
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "registered_omega_alignment": {
+    "pointcloud_sha256": "be13852710c504b50633aa9fd8b8a78f98b3f5ea90ab4e42d62cb09c0c5eb7ba",
+    "colmap_to_omega": [
+      [
+        0.07029010934912286,
+        -0.024157352785228292,
+        0.18410420910494435,
+        -0.08259405149506253
+      ],
+      [
+        0.008869469400861902,
+        0.19706595434331306,
+        0.0224718149072976,
+        -0.03303125241066536
+      ],
+      [
+        -0.18547040010080876,
+        0.00026876225075553843,
+        0.07084697775924952,
+        0.23944542110154882
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "images_sha256": "51b030b76356c1f35022b80d9d900a45ddbb92f33a7eb327c38a081cd225ed4f"
+  }
 }

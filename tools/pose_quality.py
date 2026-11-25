@@ -1,4 +1,5 @@
 """Shared endpoint quality gates, independent of ML/Blender dependencies."""
+import math
 
 def assess_pose_quality(pose):
     pnp = pose['pnp']
@@ -8,7 +9,39 @@ def assess_pose_quality(pose):
     concentration = max(sources.values(), default=0) / max(inliers, 1)
     coverage = pnp.get('inlier_spatial_support', {}).get('hull_fraction')
     reasons = []
-    if pose.get('pose_source') == 'registered_colmap':
+    if pose.get("pose_source") in ("estimated_omega_ba_sift_pnp", "estimated_omega_ba_disk_pnp"):
+        quality = pose.get("quality", {})
+        metrics = [float(quality.get(key, float("nan"))) for key in (
+            "test_median_pixels_at_768", "test_fraction_within_4_pixels_at_768",
+            "static_feature_area_fraction", "inlier_rmse_at_768")]
+        median, fraction, area, normalized_rmse = metrics
+        verified = (
+            pose.get("coordinate_system") == "omega_ba_world"
+            and quality.get("passed") is True
+            and all(math.isfinite(value) for value in metrics)
+            and inliers >= 30 and quality.get("inlier_count") == inliers
+            and quality.get("test_count", 0) >= 8
+            and 0 <= median <= 4 and .60 <= fraction <= 1
+            and .025 <= area <= 1 and 0 <= normalized_rmse <= 4
+        )
+        status = "accepted" if verified else "rejected"
+        coverage = area
+        sources = quality.get("reference_inliers", {})
+        concentration = max(sources.values(), default=0) / max(inliers, 1)
+        if not verified:
+            reasons.append("Omega endpoint failed normalized held-out reprojection and coverage checks.")
+    elif pose.get("pose_source") == "registered_static_flow_rotation_zoom":
+        held = pose.get("flow_validation", {})
+        accepted = (inliers >= 40 and 0 <= rmse <= 4
+                    and held.get("test_count", 0) >= 16
+                    and 0 <= held.get("median_at_768", float("inf")) <= 2
+                    and 0 <= held.get("p90_at_768", float("inf")) <= 4
+                    and .05 <= held.get("test_area", 0) <= 1
+                    and held.get("reference") in sources)
+        status = "accepted" if accepted else "rejected"
+        if not accepted:
+            reasons.append("Tracked static landmarks failed independent pan/zoom validation.")
+    elif pose.get('pose_source') == 'registered_colmap':
         registration = pose.get('registration', {})
         verified = (registration.get('frame_count_validated')
                     and registration.get('identity', {}).get('matches')
